@@ -51,45 +51,61 @@ for uploaded in uploaded_files:
     # Clean column names
     df.columns = [col.strip() for col in df.columns]
 
-    # 4. Determine file type and define substring-to-new-name mapping
+    # 4. Determine file type and substrings
     lname = name.lower()
-    if 'combo' in lname:
-        substr_map = {
-            'P1': 'Fridge Temp',
-            'P2': 'Freezer Temp',
-            'Date': 'Date',
-            'Time': 'Time'
+    is_combo = 'combo' in lname
+    is_fridge_freezer = 'fridge' in lname or 'freezer' in lname
+    is_room = not (is_combo or is_fridge_freezer)
+
+    # 5. Map substrings to column roles
+    if is_combo:
+        # Combo has both P1 and P2
+        roles = {
+            'Fridge Temp': 'P1',
+            'Freezer Temp': 'P2',
         }
-    elif 'fridge' in lname or 'freezer' in lname:
-        substr_map = {
-            'P1': 'Temperature',
-            'Date': 'Date',
-            'Time': 'Time'
+    elif is_fridge_freezer:
+        # Simple fridge or freezer
+        roles = {
+            'Temperature': 'P1',
         }
     else:
-        substr_map = {
-            'CH3': 'Humidity',
-            'CH4': 'Temperature',
-            'Date': 'Date',
-            'Time': 'Time'
+        # Rooms and Olympus
+        roles = {
+            'Humidity': 'CH3',
+            'Temperature': 'CH4',
         }
+    roles['Date'] = 'Date'
+    roles['Time'] = 'Time'
 
-    # 5. Find actual columns by substring match and rename
-    actual_to_new = {}
-    missing_substr = []
-    for substr, new_name in substr_map.items():
+    # 6. Find actual columns and report missing
+    actual_to_role = {}
+    missing = []
+    for role, substr in roles.items():
         matches = [c for c in df.columns if substr.lower() in c.lower()]
         if matches:
-            actual_to_new[matches[0]] = new_name
+            actual_to_role[matches[0]] = role
         else:
-            missing_substr.append(substr)
-    if missing_substr:
-        st.error(f"Missing columns in {name}: {missing_substr}")
+            missing.append(substr)
+    if missing:
+        st.error(f"Missing columns in {name}: {missing}")
         continue
 
-    # 6. Filter and rename DataFrame
-    df_filtered = df[list(actual_to_new.keys())].rename(columns=actual_to_new)
+    # 7. Filter & rename
+    df_filtered = df[list(actual_to_role.keys())].rename(columns=actual_to_role)
 
-    # 7. Display filtered & renamed data
-    st.subheader("Filtered & Renamed Data (first 5 rows)")
-    st.dataframe(df_filtered.head(), use_container_width=True)
+    # 8. Display
+    if is_combo:
+        # Split into two tables
+        st.subheader("Combo Fridge/Freezer Data")
+        # Fridge
+        st.markdown("**Fridge Temperature**")
+        st.dataframe(df_filtered[['Fridge Temp', 'Date', 'Time']], use_container_width=True)
+        # Freezer
+        st.markdown("**Freezer Temperature**")
+        st.dataframe(df_filtered[['Freezer Temp', 'Date', 'Time']], use_container_width=True)
+    else:
+        st.subheader("Filtered & Renamed Data (first 5 rows)")
+        st.dataframe(df_filtered.head(), use_container_width=True)
+
+    st.success(f"Finished processing {name}")
