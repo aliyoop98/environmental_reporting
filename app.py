@@ -36,13 +36,12 @@ for uploaded in uploaded_files:
 
     csv_text = ''.join(lines[header_idx:])
 
-    # 3. Load into DataFrame using pandas C engine, skipping bad lines
+        # 3. Load into DataFrame using pandas C engine, skipping bad lines
     try:
         df = pd.read_csv(
             io.StringIO(csv_text),
-            engine='python',
-            sep=None,
-            on_bad_lines='skip',
+            sep=',',                # assume comma-delimited
+            on_bad_lines='skip',    # skip malformed rows
             skip_blank_lines=True
         )
     except Exception as e:
