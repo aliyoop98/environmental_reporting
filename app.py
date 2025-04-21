@@ -52,15 +52,17 @@ for file in uploaded:
 if st.button("Process All Files"):
     for file in uploaded:
         content = strip_metadata(file.read())
-        # Attempt fast parsing, fallback to python engine without low_memory
+                # Attempt fast parsing
         try:
             df = pd.read_csv(io.StringIO(content))
         except Exception:
+            # Fallback: C engine skip bad lines
             try:
-                df = pd.read_csv(io.StringIO(content), engine='python', sep=None, on_bad_lines='skip')
+                df = pd.read_csv(io.StringIO(content), on_bad_lines='skip', skip_blank_lines=True)
             except Exception as e:
                 st.error(f"Failed to parse {file.name}: {e}")
                 continue
+
 
         # Normalize column names
         df.columns = [c.strip() for c in df.columns]
