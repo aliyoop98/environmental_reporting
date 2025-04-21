@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Step 1: Upload and Read CSVs with Metadata Stripping
+# Page configuration
 st.set_page_config(page_title="Environmental Reporting", layout="wide")
-st.title("Environmental Monitoring - Step 1: Upload and Read CSVs")
+st.title("Environmental Monitoring - Step 1: Upload, Read, Filter, Rename CSVs")
 
 # 1. Upload CSV files
 uploaded_files = st.file_uploader(
@@ -16,69 +16,63 @@ if not uploaded_files:
     st.info("Please upload one or more CSV files to begin.")
     st.stop()
 
-# 2. Read raw bytes
-raw_data = {file.name: file.read() for file in uploaded_files}
+# 2. Read and process each file
+for uploaded in uploaded_files:
+    name = uploaded.name
+    raw = uploaded.read()
 
-# 3. Preview raw content (first 10 lines)
-st.header("Raw File Preview")
-for name, raw in raw_data.items():
-    st.subheader(name)
-    try:
-        lines = raw.decode('utf-8', errors='ignore').splitlines()
-        st.write("".join([f"{i}: {lines[i]}\n" for i in range(min(10, len(lines)))]))
-    except Exception as e:
-        st.error(f"Error decoding raw content for {name}: {e}")
+    st.header(f"Preview: {name}")
 
-# 4. Preview parsed & filtered CSV
-st.subheader("Parsed CSV Preview (after stripping metadata and filtering channels)")
-for name, raw in raw_data.items():
-    st.markdown(f"**{name}**")
+    # 2a) Strip metadata: find the last line containing 'CH1' or 'P1'
+    lines = raw.decode('utf-8', errors='ignore').splitlines(True)
     try:
-        # Strip metadata: use last CH1 or P1 line
-        lines = raw.decode('utf-8', errors='ignore').splitlines(True)
         header_idx = max(i for i, line in enumerate(lines)
                          if 'ch1' in line.lower() or 'p1' in line.lower())
-        clean_text = "".join(lines[header_idx:])
-        df = pd.read_csv(io.StringIO(clean_text), on_bad_lines='skip', skip_blank_lines=True)
+    except ValueError:
+        st.error(f"No header row found in {name}")
+        continue
 
-        # Determine required columns based on filename
-        lower = name.lower()
-        if 'combo' in lower or ('fridge' in lower and 'freezer' in lower):
-            req = ['P1', 'P2', 'Date', 'Time']
-        elif 'freezer' in lower:
-            req = ['P1', 'Date', 'Time']
-        elif 'fridge' in lower:
-            req = ['P1', 'Date', 'Time']
-        elif 'olympus' in lower:
-            req = ['CH3', 'CH4', 'Date', 'Time']
-        else:
-            req = ['CH3', 'CH4', 'Date', 'Time']
+    csv_text = ''.join(lines[header_idx:])
 
-        # Normalize column names
-        col_map = {}
-        for col in df.columns:
-            lc = col.lower()
-            if 'date' in lc:
-                col_map[col] = 'Date'
-            elif 'time' in lc:
-                col_map[col] = 'Time'
-            elif 'p1' in lc and 'p2' not in lc:
-                col_map[col] = 'P1'
-            elif 'p2' in lc:
-                col_map[col] = 'P2'
-            elif 'ch3' in lc:
-                col_map[col] = 'CH3'
-            elif 'ch4' in lc:
-                col_map[col] = 'CH4'
-
-        df = df.rename(columns=col_map)
-        # Keep only required columns if they exist
-        keep = [c for c in req if c in df.columns]
-        df = df[keep]
-
-        if df.empty:
-            st.warning("No matching columns found.")
-        else:
-            st.dataframe(df.head(5))
+    # 2b) Load into DataFrame (python engine to auto-detect delim and skip bad lines)
+    try:
+        df = pd.read_csv(
+            io.StringIO(csv_text),
+            engine='python',
+            sep=None,
+            on_bad_lines='skip',
+            skip_blank_lines=True
+        )
     except Exception as e:
-        st.error(f"Error parsing {name}: {e}")
+        st.error(f"Failed to parse {name}: {e}")
+        continue
+
+    # Strip whitespace from col names
+    df.columns = [col.strip() for col in df.columns]
+
+    # 3. Filter and rename columns per file type
+    lname = name.lower()
+    if 'combo' in lname:
+        # Combo Fridge/Freezer
+        needed = ['P1', 'P2', 'Date', 'Time']
+        rename_map = {'P1': 'Fridge Temp', 'P2': 'Freezer Temp', 'Date': 'Date', 'Time': 'Time'}
+    elif 'fridge' in lname or 'freezer' in lname:
+        # Fridge or Freezer
+        needed = ['P1', 'Date', 'Time']
+        rename_map = {'P1': 'Temperature', 'Date': 'Date', 'Time': 'Time'}
+    else:
+        # Room or Olympus
+        needed = ['CH3', 'CH4', 'Date', 'Time']
+        rename_map = {'CH3': 'Humidity', 'CH4': 'Temperature', 'Date': 'Date', 'Time': 'Time'}
+
+    # Ensure columns exist
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        st.error(f"Missing columns in {name}: {missing}")
+        continue
+
+    df_filtered = df[needed].rename(columns=rename_map)
+
+    # 4. Show first 5 rows of filtered & renamed data
+    st.subheader("Filtered & Renamed Data (first 5 rows)")
+    st.dataframe(df_filtered.head(), use_container_width=True)
