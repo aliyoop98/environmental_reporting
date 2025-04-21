@@ -79,9 +79,13 @@ if not dfs:
     st.stop()
 
 # 3. Date selection UI
-# Parse Date column to datetime
+# 3. Parse Date column to datetime (allow 2- or 4-digit years)
 for df in dfs.values():
-    df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%Y', errors='coerce')
+    df['Date'] = pd.to_datetime(
+        df['Date'],
+        infer_datetime_format=True,
+        errors='coerce'
+    )
 # Collect year/month options
 years = sorted({dt.year for df in dfs.values() for dt in df['Date'].dropna()})
 months = sorted({dt.month for df in dfs.values() for dt in df['Date'].dropna()})
