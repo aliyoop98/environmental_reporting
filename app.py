@@ -28,17 +28,21 @@ for name, raw in raw_data.items():
     # Display first 10 lines of raw text
     st.text("\n".join(lines[:10]))
 
-# 4. Preview parsed CSV (after stripping metadata)
+# 4. Preview parsed CSV (after stripping metadata using CH1/P1 detection)
 st.subheader("Parsed CSV Preview (after stripping metadata)")
 for name, raw in raw_data.items():
     st.markdown(f"**{name}**")
     try:
-        # Strip metadata: find first line with a comma as header start
+        # Strip metadata: find header line containing 'CH1' or 'P1' (case-insensitive)
         lines = raw.decode('utf-8', errors='ignore').splitlines(True)
         header_idx = next(
-            (i for i, line in enumerate(lines) if ',' in line),
-            0
+            (i for i, line in enumerate(lines) 
+             if 'ch1' in line.lower() or 'p1' in line.lower()),
+            None
         )
+        if header_idx is None:
+            st.error(f"No header row found containing 'CH1' or 'P1' in {name}")
+            continue
         csv_text = ''.join(lines[header_idx:])
 
         # Parse CSV into DataFrame
@@ -51,4 +55,4 @@ for name, raw in raw_data.items():
     except Exception as e:
         st.error(f"Error parsing {name}: {e}")
 
-# Next: Step 2 will handle column normalization and channel filtering"
+# Next: Step 2 will handle column normalization and channel filtering
