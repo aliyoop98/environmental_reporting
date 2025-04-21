@@ -12,7 +12,7 @@ if not uploaded:
     st.info("Please upload one or more CSV files to begin.")
     st.stop()
 
-# 2. Strip metadata & load DataFrames
+# 2. Strip metadata helper
 def strip_metadata(content, keys=["CH1","P1","Temp","Humidity"]):
     lines = content.decode('utf-8', errors='ignore').splitlines(True)
     for i, line in enumerate(lines):
@@ -20,7 +20,7 @@ def strip_metadata(content, keys=["CH1","P1","Temp","Humidity"]):
             return ''.join(lines[i:])
     raise ValueError("No header row found")
 
-# Prepare container for file settings
+# Default ranges per location
 def default_ranges(loc_type):
     defaults = {
         'Fridge':   {'temp_min':2,'temp_max':8,'hum_min':None,'hum_max':None},
@@ -31,9 +31,9 @@ def default_ranges(loc_type):
     }
     return defaults.get(loc_type, defaults['Room'])
 
+# Collect settings via sidebar
 settings = {}
 for file in uploaded:
-    # sidebar settings per file
     with st.sidebar.expander(file.name, expanded=False):
         st.write(f"Configure: {file.name}")
         loc = st.selectbox("Location Type", options=['Fridge','Freezer','Combo','Room','Olympus'], key=file.name+"_loc")
@@ -44,25 +44,26 @@ for file in uploaded:
         hmax = st.number_input("Hum Max", value=dr['hum_max'] if dr['hum_max'] is not None else 100, key=file.name+"_hmax")
         settings[file.name] = {
             'location_type': loc,
-            'temp_range': (tmin, tmax) if (tmin is not None and tmax is not None) else None,
-            'humidity_range': (hmin, hmax) if (hmin is not None and hmax is not None) else None
+            'temp_range': (tmin, tmax),
+            'humidity_range': (hmin, hmax)
         }
 
-# 3. Process button
+# 3. Process on button
 if st.button("Process All Files"):
     for file in uploaded:
         content = strip_metadata(file.read())
+        # Attempt fast parsing, fallback to python engine without low_memory
         try:
-            df = pd.read_csv(io.StringIO(content), low_memory=False)
+            df = pd.read_csv(io.StringIO(content))
         except Exception:
-            # Fallback: python engine with automatic separator detection
             try:
-                df = pd.read_csv(io.StringIO(content), engine='python', sep=None, skip_blank_lines=True)
+                df = pd.read_csv(io.StringIO(content), engine='python', sep=None, on_bad_lines='skip')
             except Exception as e:
                 st.error(f"Failed to parse {file.name}: {e}")
                 continue
-        # Normalize cols
-        df = df.rename(columns=lambda c: c.strip())
+
+        # Normalize column names
+        df.columns = [c.strip() for c in df.columns]
         col_map = {}
         for c in df.columns:
             lc = c.lower()
@@ -75,12 +76,19 @@ if st.button("Process All Files"):
             elif 'time' in lc:
                 col_map[c] = 'Time'
         df = df.rename(columns=col_map)
-        df = df[['Date','Time','Temp','Humidity']]
+
+        # Ensure required columns exist
+        if not {'Date','Time','Temp'}.issubset(df.columns):
+            st.error(f"Missing required columns in {file.name}")
+            continue
 
         # Parse DateTime
-        df['DateTime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str), errors='raise')
+        df['DateTime'] = pd.to_datetime(
+            df['Date'].astype(str) + ' ' + df['Time'].astype(str),
+            errors='raise'
+        )
 
-        # Get settings
+        # Retrieve settings
         s = settings[file.name]
         loc_type = s['location_type']
         temp_range = None if loc_type=='Olympus' else s['temp_range']
@@ -88,12 +96,16 @@ if st.button("Process All Files"):
 
         # Flag out-of-range
         def oor(r):
+            # Temp check
             if temp_range and pd.notna(r['Temp']):
                 t = float(r['Temp'])
-                if t<temp_range[0] or t>temp_range[1]: return True
-            if hum_range and pd.notna(r['Humidity']):
+                if t < temp_range[0] or t > temp_range[1]:
+                    return True
+            # Humidity check (if in data)
+            if 'Humidity' in r.index and pd.notna(r['Humidity']):
                 h = float(str(r['Humidity']).lstrip('+'))
-                if h<hum_range[0] or h>hum_range[1]: return True
+                if h < hum_range[0] or h > hum_range[1]:
+                    return True
             return False
         df['OutOfRange'] = df.apply(oor, axis=1)
 
@@ -101,11 +113,12 @@ if st.button("Process All Files"):
         df['GroupID'] = (df['OutOfRange'] != df['OutOfRange'].shift(fill_value=False)).cumsum()
         events = []
         for gid, grp in df[df['OutOfRange']].groupby('GroupID'):
-            start = grp['DateTime'].iloc[0]; end = grp['DateTime'].iloc[-1]
-            dur = (end-start).total_seconds()/60
-            events.append({'Start':start,'End':end,'Duration(min)':dur})
+            start = grp['DateTime'].iloc[0]
+            end = grp['DateTime'].iloc[-1]
+            dur = (end - start).total_seconds()/60
+            events.append({'Start': start, 'End': end, 'Duration(min)': dur})
 
-        # Display
+        # Display results
         st.header(file.name)
         st.metric("Location Type", loc_type)
         st.write(pd.DataFrame(events))
