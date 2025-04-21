@@ -36,12 +36,12 @@ for uploaded in uploaded_files:
 
     csv_text = ''.join(lines[header_idx:])
 
-        # 3. Load into DataFrame using pandas C engine, skipping bad lines
+    # 3. Load into DataFrame using pandas C engine, skipping bad lines
     try:
         df = pd.read_csv(
             io.StringIO(csv_text),
-            sep=',',                # assume comma-delimited
-            on_bad_lines='skip',    # skip malformed rows
+            sep=',',
+            on_bad_lines='skip',
             skip_blank_lines=True
         )
     except Exception as e:
@@ -51,43 +51,45 @@ for uploaded in uploaded_files:
     # Clean column names
     df.columns = [col.strip() for col in df.columns]
 
-    # 4. Determine file type and set needed columns + rename map
+    # 4. Determine file type and define substring-to-new-name mapping
     lname = name.lower()
     if 'combo' in lname:
-        # Combo Fridge/Freezer
-        needed = ['P1', 'P2', 'Date', 'Time']
-        rename_map = {
+        substr_map = {
             'P1': 'Fridge Temp',
             'P2': 'Freezer Temp',
             'Date': 'Date',
             'Time': 'Time'
         }
     elif 'fridge' in lname or 'freezer' in lname:
-        # Fridge or Freezer
-        needed = ['P1', 'Date', 'Time']
-        rename_map = {
+        substr_map = {
             'P1': 'Temperature',
             'Date': 'Date',
             'Time': 'Time'
         }
     else:
-        # Room or Olympus
-        needed = ['CH3', 'CH4', 'Date', 'Time']
-        rename_map = {
+        substr_map = {
             'CH3': 'Humidity',
             'CH4': 'Temperature',
             'Date': 'Date',
             'Time': 'Time'
         }
 
-    # 5. Validate and filter
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        st.error(f"Missing columns in {name}: {missing}")
+    # 5. Find actual columns by substring match and rename
+    actual_to_new = {}
+    missing_substr = []
+    for substr, new_name in substr_map.items():
+        matches = [c for c in df.columns if substr.lower() in c.lower()]
+        if matches:
+            actual_to_new[matches[0]] = new_name
+        else:
+            missing_substr.append(substr)
+    if missing_substr:
+        st.error(f"Missing columns in {name}: {missing_substr}")
         continue
 
-    df_filtered = df[needed].rename(columns=rename_map)
+    # 6. Filter and rename DataFrame
+    df_filtered = df[list(actual_to_new.keys())].rename(columns=actual_to_new)
 
-    # 6. Display filtered & renamed data
+    # 7. Display filtered & renamed data
     st.subheader("Filtered & Renamed Data (first 5 rows)")
     st.dataframe(df_filtered.head(), use_container_width=True)
