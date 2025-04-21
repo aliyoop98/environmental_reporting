@@ -55,8 +55,12 @@ if st.button("Process All Files"):
         try:
             df = pd.read_csv(io.StringIO(content), low_memory=False)
         except Exception:
-            # Fallback for irregular CSVs
-            df = pd.read_csv(io.StringIO(content), engine='python', on_bad_lines='skip', low_memory=False)
+            # Fallback: python engine with automatic separator detection
+            try:
+                df = pd.read_csv(io.StringIO(content), engine='python', sep=None, skip_blank_lines=True)
+            except Exception as e:
+                st.error(f"Failed to parse {file.name}: {e}")
+                continue
         # Normalize cols
         df = df.rename(columns=lambda c: c.strip())
         col_map = {}
