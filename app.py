@@ -52,7 +52,11 @@ for file in uploaded:
 if st.button("Process All Files"):
     for file in uploaded:
         content = strip_metadata(file.read())
-        df = pd.read_csv(io.StringIO(content), low_memory=False)
+        try:
+            df = pd.read_csv(io.StringIO(content), low_memory=False)
+        except Exception:
+            # Fallback for irregular CSVs
+            df = pd.read_csv(io.StringIO(content), engine='python', on_bad_lines='skip', low_memory=False)
         # Normalize cols
         df = df.rename(columns=lambda c: c.strip())
         col_map = {}
@@ -102,4 +106,3 @@ if st.button("Process All Files"):
         st.metric("Location Type", loc_type)
         st.write(pd.DataFrame(events))
     st.success("Processing complete!")
-
