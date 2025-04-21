@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Page configuration
+# Step 1: Upload and Read CSVs with Metadata Stripping
 st.set_page_config(page_title="Environmental Reporting", layout="wide")
 st.title("Environmental Monitoring - Step 1: Upload and Read CSVs")
 
@@ -16,43 +16,46 @@ if not uploaded_files:
     st.info("Please upload one or more CSV files to begin.")
     st.stop()
 
-# 2. Read raw content into memory
+# 2. Read raw bytes
 raw_data = {file.name: file.read() for file in uploaded_files}
 
-# 3. Preview raw CSV content (first 10 lines)
-st.subheader("Raw CSV Content (first 10 lines)")
+# 3. Preview raw content (first 10 lines)
+st.header("Raw File Preview")
 for name, raw in raw_data.items():
-    st.markdown(f"**{name}**")
-    text = raw.decode('utf-8', errors='ignore')
-    lines = text.splitlines()
-    # Display first 10 lines of raw text
-    st.text("\n".join(lines[:10]))
-
-# 4. Preview parsed CSV (after stripping metadata using CH1/P1 detection)
-st.subheader("Parsed CSV Preview (after stripping metadata)")
-for name, raw in raw_data.items():
-    st.markdown(f"**{name}**")
+    st.subheader(name)
     try:
-        # Strip metadata: find header line containing 'CH1' or 'P1' (case-insensitive)
-        lines = raw.decode('utf-8', errors='ignore').splitlines(True)
-        header_idx = next(
-            (i for i, line in enumerate(lines) 
-             if 'ch1' in line.lower() or 'p1' in line.lower()),
-            None
-        )
-        if header_idx is None:
-            st.error(f"No header row found containing 'CH1' or 'P1' in {name}")
-            continue
-        csv_text = ''.join(lines[header_idx:])
+        lines = raw.decode('utf-8', errors='ignore').splitlines()
+        st.write("".join([f"{i}: {lines[i]}\n" for i in range(min(10, len(lines)))]))
+    except Exception as e:
+        st.error(f"Error decoding raw content for {name}: {e}")
 
-        # Parse CSV into DataFrame
-        df = pd.read_csv(
-            io.StringIO(csv_text),
-            on_bad_lines='skip',
-            skip_blank_lines=True
-        )
+# 4. Preview parsed CSV (strip metadata up to last header line)
+st.header("Parsed CSV Preview")
+for name, raw in raw_data.items():
+    st.subheader(name)
+    try:
+        # Split into lines preserving line breaks
+        lines = raw.decode('utf-8', errors='ignore').splitlines(True)
+        # Find the last occurrence of CH1 or P1 in header lines
+        header_idx = None
+        for i, line in enumerate(lines):
+            if 'CH1' in line.upper() or 'P1' in line.upper():
+                header_idx = i
+        if header_idx is None:
+            st.error(f"No header row containing 'CH1' or 'P1' found in {name}.")
+            continue
+        # Combine from header to end
+        parsed_text = ''.join(lines[header_idx:])
+        # Load into DataFrame
+        try:
+            df = pd.read_csv(io.StringIO(parsed_text))
+        except Exception:
+            df = pd.read_csv(
+                io.StringIO(parsed_text),
+                engine='python',
+                on_bad_lines='skip',
+                skip_blank_lines=True
+            )
         st.dataframe(df.head(), use_container_width=True)
     except Exception as e:
-        st.error(f"Error parsing {name}: {e}")
-
-# Next: Step 2 will handle column normalization and channel filtering
+        st.error(f"Failed to parse {name}: {e}")
