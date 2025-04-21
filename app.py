@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 import io
+import calendar
 
 # Page configuration
 st.set_page_config(page_title="Environmental Reporting", layout="wide")
-st.title("Environmental Monitoring - Step 1: Upload, Read, Filter, and Rename CSVs")
+st.title("Environmental Monitoring - Step 1: Upload, Filter, Rename & Select Date")
 
 # 1. Upload CSV files
 uploaded_files = st.file_uploader(
@@ -16,98 +17,94 @@ if not uploaded_files:
     st.info("Please upload one or more CSV files to begin.")
     st.stop()
 
-# Process each uploaded file
+# 2. Process each uploaded file into a cleaned DataFrame
+dfs = {}
 for uploaded in uploaded_files:
     name = uploaded.name
     raw = uploaded.read()
 
-    st.header(f"Preview: {name}")
-
-    # 2. Strip metadata: find the last line containing 'CH1' or 'P1'
+    # Strip metadata: header starts at last line with 'CH1' or 'P1'
     lines = raw.decode('utf-8', errors='ignore').splitlines(True)
     try:
-        header_idx = max(
-            i for i, line in enumerate(lines)
-            if 'ch1' in line.lower() or 'p1' in line.lower()
-        )
+        header_idx = max(i for i, line in enumerate(lines)
+                         if 'ch1' in line.lower() or 'p1' in line.lower())
     except ValueError:
         st.error(f"No header row found in {name}")
         continue
-
     csv_text = ''.join(lines[header_idx:])
 
-    # 3. Load into DataFrame using pandas C engine, skipping bad lines
+    # Load CSV
     try:
-        df = pd.read_csv(
-            io.StringIO(csv_text),
-            sep=',',
-            on_bad_lines='skip',
-            skip_blank_lines=True
-        )
+        df = pd.read_csv(io.StringIO(csv_text), sep=',', on_bad_lines='skip', skip_blank_lines=True)
     except Exception as e:
         st.error(f"Failed to parse {name}: {e}")
         continue
 
     # Clean column names
-    df.columns = [col.strip() for col in df.columns]
+    df.columns = [c.strip() for c in df.columns]
 
-        # 4. Determine file type and substrings
+    # Determine file type
     lname = name.lower()
     has_fridge = 'fridge' in lname
     has_freezer = 'freezer' in lname
     is_combo = has_fridge and has_freezer
-    is_fridge_freezer = has_fridge ^ has_freezer  # exclusive OR: fridge-only or freezer-only
-    is_room = not (has_fridge or has_freezer)
-
-    # 5. Map substrings to column roles
+    is_fridge_freezer = has_fridge ^ has_freezer
+    # Map raw substrings to roles
     if is_combo:
-        # Combo has both P1 and P2
-        roles = {
-            'Fridge Temp': 'P1',
-            'Freezer Temp': 'P2',
-        }
+        roles = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
     elif is_fridge_freezer:
-        # Simple fridge or freezer
-        roles = {
-            'Temperature': 'P1',
-        }
+        roles = {'Temperature': 'P1'}
     else:
-        # Rooms and Olympus
-        roles = {
-            'Humidity': 'CH3',
-            'Temperature': 'CH4',
-        }
-    roles['Date'] = 'Date'
-    roles['Time'] = 'Time'
+        roles = {'Humidity': 'CH3', 'Temperature': 'CH4'}
+    roles.update({'Date': 'Date', 'Time': 'Time'})
 
-    # 6. Find actual columns and report missing
+    # Match and rename
     actual_to_role = {}
     missing = []
     for role, substr in roles.items():
-        matches = [c for c in df.columns if substr.lower() in c.lower()]
-        if matches:
-            actual_to_role[matches[0]] = role
+        match = next((c for c in df.columns if substr.lower() in c.lower()), None)
+        if match:
+            actual_to_role[match] = role
         else:
             missing.append(substr)
     if missing:
         st.error(f"Missing columns in {name}: {missing}")
         continue
 
-    # 7. Filter & rename
-    df_filtered = df[list(actual_to_role.keys())].rename(columns=actual_to_role)
+    df_clean = df[list(actual_to_role.keys())].rename(columns=actual_to_role)
+    dfs[name] = df_clean
+    st.success(f"Loaded and cleaned {name}")
 
-    # 8. Display
-    if is_combo:
-        # Split into two tables
-        st.subheader("Combo Fridge/Freezer Data")
-        # Fridge
-        st.markdown("**Fridge Temperature**")
-        st.dataframe(df_filtered[['Fridge Temp', 'Date', 'Time']], use_container_width=True)
-        # Freezer
-        st.markdown("**Freezer Temperature**")
-        st.dataframe(df_filtered[['Freezer Temp', 'Date', 'Time']], use_container_width=True)
+if not dfs:
+    st.stop()
+
+# 3. Date selection UI
+# Parse Date column to datetime
+for df in dfs.values():
+    df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%Y', errors='coerce')
+# Collect year/month options
+years = sorted({dt.year for df in dfs.values() for dt in df['Date'].dropna()})
+months = sorted({dt.month for df in dfs.values() for dt in df['Date'].dropna()})
+
+col1, col2 = st.columns(2)
+with col1:
+    year = st.selectbox('Select Year', years)
+with col2:
+    month = st.selectbox('Select Month', months, format_func=lambda x: calendar.month_name[x])
+
+# 4. Display filtered data by selection
+st.subheader(f"Data for {calendar.month_name[month]} {year}")
+for name, df in dfs.items():
+    st.header(name)
+    df_sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)]
+    if df_sel.empty:
+        st.write("No data for this period.")
+        continue
+    # Combo split
+    if 'Fridge Temp' in df_sel.columns and 'Freezer Temp' in df_sel.columns:
+        st.subheader('Fridge Temperature')
+        st.dataframe(df_sel[['Fridge Temp', 'Date', 'Time']], use_container_width=True)
+        st.subheader('Freezer Temperature')
+        st.dataframe(df_sel[['Freezer Temp', 'Date', 'Time']], use_container_width=True)
     else:
-        st.subheader("Filtered & Renamed Data (first 5 rows)")
-        st.dataframe(df_filtered.head(), use_container_width=True)
-
-    st.success(f"Finished processing {name}")
+        st.dataframe(df_sel, use_container_width=True)
