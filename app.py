@@ -27,7 +27,7 @@ def default_ranges(loc_type):
         'Freezer':  {'temp_min':-35,'temp_max':-5,'hum_min':None,'hum_max':None},
         'Combo':    {'temp_min':-35,'temp_max':8,'hum_min':None,'hum_max':None},
         'Room':     {'temp_min':15,'temp_max':25,'hum_min':0,'hum_max':60},
-        'Olympus':  {'temp_min':None,'temp_max':None,'hum_min':0,'hum_max':60}
+        'Olympus':  {'temp_min':15,'temp_max':28,'hum_min':0,'hum_max':60}
     }
     return defaults.get(loc_type, defaults['Room'])
 
