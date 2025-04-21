@@ -51,11 +51,13 @@ for uploaded in uploaded_files:
     # Clean column names
     df.columns = [col.strip() for col in df.columns]
 
-    # 4. Determine file type and substrings
+        # 4. Determine file type and substrings
     lname = name.lower()
-    is_combo = 'combo' in lname
-    is_fridge_freezer = 'fridge' in lname or 'freezer' in lname
-    is_room = not (is_combo or is_fridge_freezer)
+    has_fridge = 'fridge' in lname
+    has_freezer = 'freezer' in lname
+    is_combo = has_fridge and has_freezer
+    is_fridge_freezer = has_fridge ^ has_freezer  # exclusive OR: fridge-only or freezer-only
+    is_room = not (has_fridge or has_freezer)
 
     # 5. Map substrings to column roles
     if is_combo:
