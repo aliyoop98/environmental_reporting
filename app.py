@@ -177,33 +177,38 @@ for name, df in dfs.items():
             if ts_df is not None and ch in ts_df.columns:
                 ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
                 ts_sub['Source'] = 'Tempstick'
-                df_chart = pd.concat([
-                    probe_sub, ts_sub
-                ], ignore_index=True)
+                df_chart = pd.concat([probe_sub, ts_sub], ignore_index=True)
             low, high = ranges[name].get(ch, (None, None))
             data_min = df_chart['Value'].min()
             data_max = df_chart['Value'].max()
-            span = (
-                (high if high is not None else data_max) -
-                (low if low is not None else data_min)
-            )
+            span = ((high if high is not None else data_max) - (low if low is not None else data_min))
             pad = span * 0.1
             ymin = (low if low is not None else data_min) - pad
             ymax = (high if high is not None else data_max) + pad
-            chart = alt.Chart(df_chart).mark_line().encode(
-                x=alt.X(
-                    'DateTime:T',
-                    title='Date/Time',
-                    scale=alt.Scale(domain=[start_date, end_date])
-                ),
-                y=alt.Y(
-                    'Value:Q',
-                    title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})",
-                    scale=alt.Scale(domain=[ymin, ymax])
-                ),
-                color='Source:N'
+            base = alt.Chart(df_chart).encode(
+                x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
+                y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax])),
+                color=alt.Color('Source:N')
             )
+            line = base.mark_line()
+            if low is not None:
+                low_df = pd.DataFrame({'value': [low]})
+                low_line = alt.Chart(low_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
+                line = line + low_line
+            if high is not None:
+                high_df = pd.DataFrame({'value': [high]})
+                high_line = alt.Chart(high_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
+                line = line + high_line
+            chart = line
             st.altair_chart(
+                chart.properties(
+                    title=(
+                        f"{title} - {ch} | Materials: {materials} | "
+                        f"Probe: {probe_id} | Equipment: {equip_id}"
+                    )
+                ),
+                use_container_width=True
+            )
                 chart.properties(
                     title=(
                         f"{title} - {ch} | Materials: {materials} | "
