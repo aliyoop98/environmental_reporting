@@ -19,12 +19,32 @@ tempstick_files = st.sidebar.file_uploader("Upload Tempstick CSV files (optional
 tempdfs = {}
 if tempstick_files:
     for f in tempstick_files:
-        df_ts = pd.read_csv(f, parse_dates=["Timestamp"]).rename(columns=str.strip)
-        df_ts = df_ts.rename(columns={"Timestamp":"DateTime"})
-        df_ts["Temperature"] = pd.to_numeric(df_ts["Temperature"], errors='coerce')
-        if "Humidity" in df_ts.columns:
-            df_ts["Humidity"] = pd.to_numeric(df_ts["Humidity"], errors='coerce')
-        tempdfs[f.name] = df_ts
+        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
+        try:
+            idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
+        except ValueError:
+            st.warning(f"No valid header row found in Tempstick {f.name}, skipping.")
+            continue
+        csv_text = ''.join(raw[idx:])
+        df_ts = pd.read_csv(io.StringIO(csv_text), on_bad_lines='skip').rename(columns=str.strip)
+        ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
+        if not ts_col:
+            st.warning(f"No Timestamp column in Tempstick {f.name}, skipping.")
+            continue
+        df_ts = df_ts.rename(columns={ts_col: 'DateTime'})
+        df_ts['DateTime'] = pd.to_datetime(df_ts['DateTime'], infer_datetime_format=True, errors='coerce')
+        temp_col = next((c for c in df_ts.columns if 'temp' in c.lower()), None)
+        if temp_col:
+            df_ts['Temperature'] = pd.to_numeric(df_ts[temp_col], errors='coerce')
+        hum_col = next((c for c in df_ts.columns if 'hum' in c.lower()), None)
+        if hum_col:
+            df_ts['Humidity'] = pd.to_numeric(df_ts[hum_col], errors='coerce')
+        cols = ['DateTime']
+        if 'Temperature' in df_ts.columns:
+            cols.append('Temperature')
+        if 'Humidity' in df_ts.columns:
+            cols.append('Humidity')
+        tempdfs[f.name] = df_ts[cols]
 
 # Parse Probe CSVs
 dfs = {}
