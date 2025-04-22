@@ -83,11 +83,13 @@ for uploaded in uploaded_files:
     elif is_fridge_freezer:
         rng = {'Temperature': (2, 8) if has_fridge else (-35, -5)}
     else:
-        rng = {'Temperature': (15, 28) if 'olympus' in lname else (15, 25),
-               'Humidity': (0, 60)}
+        rng = {
+            'Temperature': (15, 28) if 'olympus' in lname else (15, 25),
+            'Humidity': (0, 60)
+        }
     ranges[name] = rng
     st.success(f"Loaded {name}")
-    st.write(f"**Default Ranges for {name}:** {rng}")
+    st.write(f"Default Ranges for {name}: {rng}")
 
 if not dfs:
     st.stop()
@@ -145,7 +147,7 @@ for name, df in dfs.items():
                          .mark_rule(color='red', strokeDash=[4,4])
                          .encode(y='y:Q'))
 
-    points = alt.Chart(df_melt[df_melt['Measurement'].isin(plot_cols) & df_sel['OutOfRange']])
+    points = alt.Chart(df_melt[df_sel['OutOfRange'] & df_melt['Measurement'].isin(plot_cols)])
     points = points.mark_circle(color='red', size=50).encode(
         x='DateTime:T', y='Value:Q', tooltip=['DateTime', 'Measurement', 'Value']
     )
@@ -155,9 +157,7 @@ for name, df in dfs.items():
         chart += r
     st.altair_chart(chart.properties(title=title).interactive(), use_container_width=True)
 
-    st.markdown(f"**Materials:** {materials}  
-**Probe ID:** {probe_id}  
-**Equipment ID:** {equipment_id}")
+    st.markdown(f"**Materials:** {materials}<br>**Probe ID:** {probe_id}<br>**Equipment ID:** {equipment_id}", unsafe_allow_html=True)
 
     events = []
     df_sel['GroupID'] = (df_sel['OutOfRange'] != df_sel['OutOfRange'].shift(fill_value=False)).cumsum()
