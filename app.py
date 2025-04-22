@@ -106,8 +106,7 @@ for name, df in dfs.items():
             channels = ['Temperature']
         else:
             channels = ['Temperature','Humidity']
-        cols = st.columns(len(channels))
-        for col_name, col_key in zip(channels, cols):
+        for col_name in channels:
             sub = sel[['DateTime', col_name, 'OOR']].rename(columns={col_name:'Value'})
             base = alt.Chart(sub).mark_line().encode(
                 x=alt.X('DateTime:T', title='Date/Time'),
@@ -127,9 +126,9 @@ for name, df in dfs.items():
             for rule in rules:
                 chart = chart + rule
             chart = chart.properties(
-                title=f"{title} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id} | {col_name}" 
+                title=f"{title} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id} | {col_name}"
             ).interactive()
-            col_key.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, use_container_width=True)
         sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
         events = []
         for gid, grp in sel.groupby('Group'):
