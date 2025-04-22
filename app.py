@@ -161,9 +161,11 @@ for name, df in dfs.items():
         for r in rules:
             chart += r
         st.altair_chart(
-            chart.properties(title=f"{title} - {col}
-Materials: {materials} | Probe: {probe_id} | Equipment: {equipment_id}")
-                  .interactive(),
+    (chart.properties(
+        title=f"{title} - {col} | Materials: {materials} | Probe: {probe_id} | Equipment: {equipment_id}"
+    )).interactive(),
+    use_container_width=True
+),
             use_container_width=True
         )
     st.markdown(
