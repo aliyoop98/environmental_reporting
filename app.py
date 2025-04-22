@@ -130,14 +130,14 @@ for name, df in dfs.items():
     df_sel['OutOfRange'] = df_sel.apply(check_oor, axis=1)
 
     plot_cols = list(rng.keys())
-    df_melt = df_sel.melt(id_vars='DateTime', value_vars=plot_cols,
-                           var_name='Measurement', value_name='Value')
-    base = alt.Chart(df_melt).mark_line().encode(
-        x='DateTime:T', y='Value:Q', color='Measurement:N'
-    )
-
-    rules = []
-    for col_name, (mn, mx) in rng.items():
+    # Separate charts for each measurement
+    for col in plot_cols:
+        df_plot = df_sel[['DateTime', col, 'OutOfRange']].rename(columns={col: 'Value'})
+        base = alt.Chart(df_plot).mark_line().encode(
+            x='DateTime:T', y='Value:Q'
+        )
+        rules = []
+        mn, mx = rng[col]
         if mn is not None:
             rules.append(alt.Chart(pd.DataFrame({'y': [mn]}))
                          .mark_rule(color='red', strokeDash=[4,4])
@@ -146,18 +146,21 @@ for name, df in dfs.items():
             rules.append(alt.Chart(pd.DataFrame({'y': [mx]}))
                          .mark_rule(color='red', strokeDash=[4,4])
                          .encode(y='y:Q'))
+        points = alt.Chart(df_plot[df_plot['OutOfRange']]).mark_circle(color='red', size=50).encode(
+            x='DateTime:T', y='Value:Q', tooltip=['DateTime', 'Value']
+        )
+        chart = base + points
+        for r in rules:
+            chart += r
+        st.altair_chart(
+            chart.properties(title=f"{title} - {col}").interactive(),
+            use_container_width=True
+        )
 
-    points = alt.Chart(df_melt[df_sel['OutOfRange'] & df_melt['Measurement'].isin(plot_cols)])
-    points = points.mark_circle(color='red', size=50).encode(
-        x='DateTime:T', y='Value:Q', tooltip=['DateTime', 'Measurement', 'Value']
+    st.markdown(
+        f"**Materials:** {materials}<br>**Probe ID:** {probe_id}<br>**Equipment ID:** {equipment_id}",
+        unsafe_allow_html=True
     )
-
-    chart = base + points
-    for r in rules:
-        chart += r
-    st.altair_chart(chart.properties(title=title).interactive(), use_container_width=True)
-
-    st.markdown(f"**Materials:** {materials}<br>**Probe ID:** {probe_id}<br>**Equipment ID:** {equipment_id}", unsafe_allow_html=True)
 
     events = []
     df_sel['GroupID'] = (df_sel['OutOfRange'] != df_sel['OutOfRange'].shift(fill_value=False)).cumsum()
