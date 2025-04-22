@@ -120,34 +120,51 @@ with col2:
 st.subheader(f"Out-of-Range Events for {calendar.month_name[month]} {year}")
 for name, df in dfs.items():
     st.header(name)
-    df_sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)]
+    df_sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].copy()
     if df_sel.empty:
         st.write("No data for this period.")
         continue
 
+    # Ensure chronological order
+    df_sel = df_sel.sort_values('DateTime').reset_index(drop=True)
     # Determine OOR
     rng = ranges[name]
-    def check_oor(row):
+    def check_oor(idx, row):
         for col, (mn, mx) in rng.items():
-            if pd.notna(row.get(col)):
+            val = row.get(col)
+            if pd.notna(val):
                 try:
-                    val = float(row[col])
-                    if val < mn or val > mx:
+                    fval = float(val)
+                    if fval < mn or fval > mx:
                         return True
                 except:
                     return True
         return False
 
-    df_sel['OutOfRange'] = df_sel.apply(check_oor, axis=1)
+    df_sel['OutOfRange'] = [check_oor(i, r) for i, r in df_sel.iterrows()]
+    # Group events
     df_sel['GroupID'] = (df_sel['OutOfRange'] != df_sel['OutOfRange'].shift(fill_value=False)).cumsum()
 
     # Summarize events
     events = []
-    for gid, grp in df_sel[df_sel['OutOfRange']].groupby('GroupID'):
+    grouped = df_sel.groupby('GroupID')
+    for gid, grp in grouped:
+        if not grp['OutOfRange'].iloc[0]:
+            continue
         start = grp['DateTime'].iloc[0]
-        end = grp['DateTime'].iloc[-1]
+        if len(grp) > 1:
+            end = grp['DateTime'].iloc[-1]
+        else:
+            # Single-row event: take next normal timestamp if available
+            next_rows = df_sel.iloc[grp.index[0]+1:]
+            if not next_rows.empty:
+                # first where OutOfRange False
+                nxt = next_rows[next_rows['OutOfRange'] == False]
+                end = nxt['DateTime'].iloc[0] if not nxt.empty else start
+            else:
+                end = start
         dur = (end - start).total_seconds() / 60
-        events.append({'Start': start, 'End': end, 'Duration(min)': dur})
+        events.append({'Start': start, 'End': end, 'Duration(min)': max(dur, 0)})
 
     total_out = sum(e['Duration(min)'] for e in events)
     any_long = any(e['Duration(min)'] > 60 for e in events)
