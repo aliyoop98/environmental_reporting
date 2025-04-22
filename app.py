@@ -123,27 +123,27 @@ for name, df in dfs.items():
     has_fridge = 'fridge' in name.lower()
     has_freezer = 'freezer' in name.lower()
     if has_fridge and has_freezer:
-        plot_keys = ['Fridge Temp','Freezer Temp']
+        plot_groups = [('Fridge Temp','Fridge Temp'),('Freezer Temp','Freezer Temp')]
     elif has_fridge or has_freezer:
-        plot_keys = ['Temperature']
+        plot_groups = [('Temperature','Temperature')]
     else:
-        plot_keys = ['Temperature','Humidity']
-    for col in plot_keys:
+        plot_groups = [('Temperature','Temperature'),('Humidity','Humidity')]
+    for col_key, col in plot_groups:
         df_plot = df_sel[['DateTime',col,'OutOfRange']].rename(columns={col:'Value'})
         base = alt.Chart(df_plot).mark_line().encode(
             x=alt.X('DateTime:T', title='Date/Time'),
             y=alt.Y('Value:Q', title=f"{col} ({'°C' if 'Temp' in col else '%RH'})")
         )
         mn,mx = rng[col]
-        rules = []
+        rule_charts = []
         if mn is not None:
-            rules.append(
+            rule_charts.append(
                 alt.Chart(pd.DataFrame({'y':[mn]}))
                    .mark_rule(color='red',strokeDash=[4,4])
                    .encode(y='y:Q')
             )
         if mx is not None:
-            rules.append(
+            rule_charts.append(
                 alt.Chart(pd.DataFrame({'y':[mx]}))
                    .mark_rule(color='red',strokeDash=[4,4])
                    .encode(y='y:Q')
@@ -158,19 +158,12 @@ for name, df in dfs.items():
                )
         )
         chart = base + points
-        for r in rules:
-            chart += r
-        st.altair_chart(
-    (chart.properties(
-        title=f"{title} - {col} | Materials: {materials} | Probe: {probe_id} | Equipment: {equipment_id}"
-    )).interactive(),
-    use_container_width=True
-)
-).interactive(),
-    use_container_width=True
-),
-            use_container_width=True
-        )
+        for r in rule_charts:
+            chart = chart + r
+        chart = chart.properties(
+            title=f"{title} | Materials: {materials} | Probe: {probe_id} | Equipment: {equipment_id}"
+        ).interactive()
+        st.altair_chart(chart, use_container_width=True)
     st.markdown(
         f"**Materials:** {materials}<br>**Probe ID:** {probe_id}<br>**Equipment ID:** {equipment_id}",
         unsafe_allow_html=True
