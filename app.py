@@ -165,6 +165,9 @@ for name, df in dfs.items():
         title=f"{title} - {col} | Materials: {materials} | Probe: {probe_id} | Equipment: {equipment_id}"
     )).interactive(),
     use_container_width=True
+)
+).interactive(),
+    use_container_width=True
 ),
             use_container_width=True
         )
