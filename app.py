@@ -6,7 +6,6 @@ import altair as alt
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="📈")
 
-# Sidebar for file upload and date selection
 st.sidebar.header("Data Upload & Date Selection")
 uploaded = st.sidebar.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
 if not uploaded:
@@ -17,61 +16,64 @@ dfs = {}
 ranges = {}
 for file in uploaded:
     name = file.name
-    raw = file.read()
-    lines = raw.decode('utf-8', errors='ignore').splitlines(True)
+    raw = file.read().decode('utf-8', errors='ignore').splitlines(True)
     try:
-        idx = max(i for i, L in enumerate(lines) if 'ch1' in L.lower() or 'p1' in L.lower())
+        idx = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
     except ValueError:
-        st.sidebar.error(f"No header in {name}")
+        st.sidebar.error(f"No valid header in {name}")
         continue
-    text = ''.join(lines[idx:])
+    content = ''.join(raw[idx:])
     try:
-        df = pd.read_csv(io.StringIO(text), on_bad_lines='skip').rename(columns=str.strip)
+        df = pd.read_csv(io.StringIO(content), on_bad_lines='skip').rename(columns=str.strip)
     except Exception as e:
         st.sidebar.error(f"Failed parsing {name}: {e}")
         continue
     lname = name.lower()
-    fridge = 'fridge' in lname
-    freezer = 'freezer' in lname
-    if fridge and freezer:
-        roles = {'Fridge Temp':'P1','Freezer Temp':'P2'}
-    elif fridge or freezer:
-        roles = {'Temperature':'P1'}
+    has_fridge = 'fridge' in lname
+    has_freezer = 'freezer' in lname
+    if has_fridge and has_freezer:
+        mapping = {'Fridge Temp':'P1', 'Freezer Temp':'P2'}
+    elif has_fridge or has_freezer:
+        mapping = {'Temperature':'P1'}
     else:
-        roles = {'Humidity':'CH3','Temperature':'CH4'}
-    roles.update({'Date':'Date','Time':'Time'})
-    actual = {}
+        mapping = {'Humidity':'CH3', 'Temperature':'CH4'}
+    mapping.update({'Date':'Date', 'Time':'Time'})
+    col_map = {}
     missing = []
-    for R, sub in roles.items():
-        col = next((c for c in df.columns if sub.lower() in c.lower()), None)
-        if col: actual[col] = R
-        else: missing.append(sub)
+    for new, key in mapping.items():
+        col = next((c for c in df.columns if key.lower() in c.lower()), None)
+        if col:
+            col_map[col] = new
+        else:
+            missing.append(key)
     if missing:
-        st.sidebar.error(f"{name} missing: {missing}")
+        st.sidebar.error(f"{name} missing columns: {missing}")
         continue
-    df = df[list(actual)].rename(columns=actual)
+    df = df[list(col_map)].rename(columns=col_map)
     df['Date'] = pd.to_datetime(df['Date'], infer_datetime_format=True, errors='coerce')
     df['DateTime'] = pd.to_datetime(df['Date'].dt.strftime('%Y-%m-%d ') + df['Time'].astype(str), errors='coerce')
+    for col in [c for c in df.columns if c not in ['Date', 'Time', 'DateTime']]:
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace('+', ''), errors='coerce')
+    df = df.reset_index(drop=True)
     dfs[name] = df
-    if fridge and freezer:
-        ranges[name] = {'Fridge Temp':(2,8),'Freezer Temp':(-35,-5)}
-    elif fridge:
+    if has_fridge and has_freezer:
+        ranges[name] = {'Fridge Temp':(2,8), 'Freezer Temp':(-35,-5)}
+    elif has_fridge:
         ranges[name] = {'Temperature':(2,8)}
-    elif freezer:
+    elif has_freezer:
         ranges[name] = {'Temperature':(-35,-5)}
     else:
-        ranges[name] = {
-            'Temperature':(15,28) if 'olympus' in lname else (15,25),
-            'Humidity':(0,60)
-        }
+        temp_range = (15,28) if 'olympus' in lname else (15,25)
+        ranges[name] = {'Temperature':temp_range, 'Humidity':(0,60)}
 
-# Year & Month selectors
 years = sorted({d.year for df in dfs.values() for d in df['Date'].dropna()})
 months = sorted({d.month for df in dfs.values() for d in df['Date'].dropna()})
+if not years or not months:
+    st.sidebar.error("No valid date data found.")
+    st.stop()
 year = st.sidebar.selectbox("Year", years)
 month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
 
-# Main: iterate files
 for name, df in dfs.items():
     st.markdown(f"## {name}")
     with st.expander("Chart & Metadata", expanded=True):
@@ -84,58 +86,66 @@ for name, df in dfs.items():
         if not submit:
             st.info("Enter metadata and click 'Generate Charts'.")
             continue
-        sel = df[(df['Date'].dt.year==year)&(df['Date'].dt.month==month)].sort_values('DateTime')
+        sel = df[(df['Date'].dt.year==year) & (df['Date'].dt.month==month)].sort_values('DateTime').reset_index(drop=True)
         if sel.empty:
             st.warning("No data for selected period.")
             continue
         rng = ranges[name]
-        def flag(r):
-            for c,(low,high) in rng.items():
-                v = r.get(c)
-                if pd.notna(v) and (v<low or v>high): return True
+        def is_oor(row):
+            for col, (low, high) in rng.items():
+                v = row.get(col)
+                if pd.notna(v) and (v < low or v > high):
+                    return True
             return False
-        sel['OOR'] = sel.apply(flag, axis=1)
-        fridge = 'fridge' in name.lower()
-        freezer = 'freezer' in name.lower()
-        channels = []
-        if fridge and freezer:
+        sel['OOR'] = sel.apply(is_oor, axis=1)
+        has_fridge = 'fridge' in name.lower()
+        has_freezer = 'freezer' in name.lower()
+        if has_fridge and has_freezer:
             channels = ['Fridge Temp','Freezer Temp']
-        elif fridge or freezer:
+        elif has_fridge or has_freezer:
             channels = ['Temperature']
         else:
             channels = ['Temperature','Humidity']
         cols = st.columns(len(channels))
-        for col, colkey in zip(channels, cols):
-            sub = sel[['DateTime',col,'OOR']].rename(columns={col:'Value'})
-            chart = alt.Chart(sub).mark_line().encode(
+        for col_name, col_key in zip(channels, cols):
+            sub = sel[['DateTime', col_name, 'OOR']].rename(columns={col_name:'Value'})
+            base = alt.Chart(sub).mark_line().encode(
                 x=alt.X('DateTime:T', title='Date/Time'),
-                y=alt.Y('Value:Q', title=col + (' (°C)' if 'Temp' in col else ' (%RH)'))
+                y=alt.Y('Value:Q', title=f"{col_name} ({'°C' if 'Temp' in col_name else '%RH'})"),
+                color=alt.value('blue')
+            )
+            pts = alt.Chart(sub[sub['OOR']]).mark_point(color='red', size=50).encode(
+                x='DateTime:T', y='Value:Q', tooltip=['DateTime','Value']
             )
             rules = []
-            low, high = rng.get(col, (None,None))
+            low, high = rng.get(col_name, (None, None))
             if low is not None:
                 rules.append(alt.Chart(pd.DataFrame({'y':[low]})).mark_rule(color='red',strokeDash=[4,4]).encode(y='y:Q'))
             if high is not None:
                 rules.append(alt.Chart(pd.DataFrame({'y':[high]})).mark_rule(color='red',strokeDash=[4,4]).encode(y='y:Q'))
-            points = alt.Chart(sub[sub['OOR']]).mark_point(color='red',size=50).encode(x='DateTime:T',y='Value:Q',tooltip=['DateTime','Value'])
-            final = chart + points
-            for r in rules: final |= r
-            final = final.properties(title=title + f" | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}").interactive()
-            colkey.altair_chart(final, use_container_width=True)
-        # Show events
-        sel['G'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
-        ev = []
-        for gid, grp in sel.groupby('G'):
-            if not grp['OOR'].iloc[0]: continue
+            chart = base + pts
+            for rule in rules:
+                chart = chart + rule
+            chart = chart.properties(
+                title=f"{title} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id} | {col_name}" 
+            ).interactive()
+            col_key.altair_chart(chart, use_container_width=True)
+        sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
+        events = []
+        for gid, grp in sel.groupby('Group'):
+            if not grp['OOR'].iloc[0]:
+                continue
             start = grp['DateTime'].iloc[0]
-            idx = grp.index[-1]
-            nxt = sel.iloc[idx+1:]
-            end = nxt[nxt['OOR']==False]['DateTime'].iloc[0] if not nxt[nxt['OOR']==False].empty else grp['DateTime'].iloc[-1]
-            dur = max((end-start).total_seconds()/60,0)
-            ev.append({'Start':start,'End':end,'Duration(min)':dur})
-        if ev:
+            last_idx = grp.index[-1]
+            if last_idx + 1 < len(sel) and not sel.loc[last_idx+1, 'OOR']:
+                end = sel.loc[last_idx+1, 'DateTime']
+            else:
+                end = grp['DateTime'].iloc[-1]
+            duration = max((end - start).total_seconds() / 60, 0)
+            events.append({'Start':start, 'End':end, 'Duration(min)':duration})
+        if events:
             st.markdown("**Out-of-Range Events**")
-            st.table(pd.DataFrame(ev))
-            total = sum(e['Duration(min)'] for e in ev)
-            incident = total>=60 or any(e['Duration(min)']>60 for e in ev)
+            st.table(pd.DataFrame(events))
+            total = sum(e['Duration(min)'] for e in events)
+            incident = total >= 60 or any(e['Duration(min)'] > 60 for e in events)
             st.write(f"Total OOR minutes: {total:.1f} | Incident: {'YES' if incident else 'No'}")
