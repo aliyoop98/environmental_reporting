@@ -32,12 +32,16 @@ for file in uploaded:
     has_fridge = 'fridge' in lname
     has_freezer = 'freezer' in lname
     if has_fridge and has_freezer:
-        mapping = {'Fridge Temp':'P1', 'Freezer Temp':'P2'}
+        mapping = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
     elif has_fridge or has_freezer:
-        mapping = {'Temperature':'P1'}
+        mapping = {'Temperature': 'P1'}
     else:
-        mapping = {'Humidity':'CH3', 'Temperature':'CH4'}
-    mapping.update({'Date':'Date', 'Time':'Time'})
+        cols_lower = [c.lower() for c in df.columns]
+        if any('ch4' in c for c in cols_lower):
+            mapping = {'Humidity': 'CH3', 'Temperature': 'CH4'}
+        else:
+            mapping = {'Humidity': 'CH1', 'Temperature': 'CH2'}
+    mapping.update({'Date': 'Date', 'Time': 'Time'})
     col_map = {}
     missing = []
     for new, key in mapping.items():
@@ -57,14 +61,14 @@ for file in uploaded:
     df = df.reset_index(drop=True)
     dfs[name] = df
     if has_fridge and has_freezer:
-        ranges[name] = {'Fridge Temp':(2,8), 'Freezer Temp':(-35,-5)}
+        ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
     elif has_fridge:
-        ranges[name] = {'Temperature':(2,8)}
+        ranges[name] = {'Temperature': (2, 8)}
     elif has_freezer:
-        ranges[name] = {'Temperature':(-35,-5)}
+        ranges[name] = {'Temperature': (-35, -5)}
     else:
-        temp_range = (15,28) if 'olympus' in lname else (15,25)
-        ranges[name] = {'Temperature':temp_range, 'Humidity':(0,60)}
+        temp_range = (15, 28) if 'olympus' in lname else (15, 25)
+        ranges[name] = {'Temperature': temp_range, 'Humidity': (0, 60)}
 
 years = sorted({d.year for df in dfs.values() for d in df['Date'].dropna()})
 months = sorted({d.month for df in dfs.values() for d in df['Date'].dropna()})
@@ -86,7 +90,7 @@ for name, df in dfs.items():
         if not submit:
             st.info("Enter metadata and click 'Generate Charts'.")
             continue
-        sel = df[(df['Date'].dt.year==year) & (df['Date'].dt.month==month)].sort_values('DateTime').reset_index(drop=True)
+        sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
         if sel.empty:
             st.warning("No data for selected period.")
             continue
@@ -101,30 +105,34 @@ for name, df in dfs.items():
         has_fridge = 'fridge' in name.lower()
         has_freezer = 'freezer' in name.lower()
         if has_fridge and has_freezer:
-            channels = ['Fridge Temp','Freezer Temp']
+            channels = ['Fridge Temp', 'Freezer Temp']
         elif has_fridge or has_freezer:
             channels = ['Temperature']
         else:
-            channels = ['Temperature','Humidity']
+            channels = ['Temperature', 'Humidity']
         for col_name in channels:
-            sub = sel[['DateTime', col_name, 'OOR']].rename(columns={col_name:'Value'})
+            sub = sel[['DateTime', col_name, 'OOR']].rename(columns={col_name: 'Value'})
             base = alt.Chart(sub).mark_line().encode(
                 x=alt.X('DateTime:T', title='Date/Time'),
                 y=alt.Y('Value:Q', title=f"{col_name} ({'°C' if 'Temp' in col_name else '%RH'})"),
                 color=alt.value('blue')
             )
             pts = alt.Chart(sub[sub['OOR']]).mark_point(color='red', size=50).encode(
-                x='DateTime:T', y='Value:Q', tooltip=['DateTime','Value']
+                x='DateTime:T', y='Value:Q', tooltip=['DateTime', 'Value']
             )
             rules = []
             low, high = rng.get(col_name, (None, None))
             if low is not None:
-                rules.append(alt.Chart(pd.DataFrame({'y':[low]})).mark_rule(color='red',strokeDash=[4,4]).encode(y='y:Q'))
+                rules.append(
+                    alt.Chart(pd.DataFrame({'y': [low]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')
+                )
             if high is not None:
-                rules.append(alt.Chart(pd.DataFrame({'y':[high]})).mark_rule(color='red',strokeDash=[4,4]).encode(y='y:Q'))
+                rules.append(
+                    alt.Chart(pd.DataFrame({'y': [high]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')
+                )
             chart = base + pts
             for rule in rules:
-                chart = chart + rule
+                chart += rule
             chart = chart.properties(
                 title=f"{title} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id} | {col_name}"
             ).interactive()
@@ -141,7 +149,7 @@ for name, df in dfs.items():
             else:
                 end = grp['DateTime'].iloc[-1]
             duration = max((end - start).total_seconds() / 60, 0)
-            events.append({'Start':start, 'End':end, 'Duration(min)':duration})
+            events.append({'Start': start, 'End': end, 'Duration(min)': duration})
         if events:
             st.markdown("**Out-of-Range Events**")
             st.table(pd.DataFrame(events))
