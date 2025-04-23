@@ -21,58 +21,62 @@ tempstick_files = st.sidebar.file_uploader(
 )
 
 tempdfs = {}
-# Tempstick parsing
 for f in tempstick_files or []:
     raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
     try:
-        idx = max(i for i,line in enumerate(raw) if 'timestamp' in line.lower())
+        idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
     except ValueError:
         continue
     text = ''.join(raw[idx:])
     df_ts = pd.read_csv(io.StringIO(text), on_bad_lines='skip', skip_blank_lines=True)
     df_ts.columns = [c.strip() for c in df_ts.columns]
-    # find timestamp col
     ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
     if not ts_col:
         continue
     df_ts['DateTime'] = pd.to_datetime(df_ts[ts_col], errors='coerce')
-    # temperature/humidity cols
-    for col in ['Temperature','Humidity']:
+    for col in ['Temperature', 'Humidity']:
         if col in df_ts.columns:
             df_ts[col] = pd.to_numeric(df_ts[col], errors='coerce')
-    tempdfs[f.name] = df_ts[['DateTime'] + [c for c in ['Temperature','Humidity'] if c in df_ts.columns]]
+    tempdfs[f.name] = df_ts[['DateTime'] + [c for c in ['Temperature', 'Humidity'] if c in df_ts.columns]]
 
-# Probe parsing
-parsed = {}
+# Parse Probe CSVs
+parsed_probes = {}
 for f in probe_files:
     raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
     try:
-        header = max(i for i,line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
+        header = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
     except ValueError:
         continue
     text = ''.join(raw[header:])
     df = pd.read_csv(io.StringIO(text), on_bad_lines='skip')
     df.columns = [c.strip() for c in df.columns]
-    # map cols
     col_map = {}
     for c in df.columns:
         lc = c.lower()
-        if 'date' in lc: col_map[c] = 'Date'
-        elif 'time' in lc: col_map[c] = 'Time'
-        elif 'p1' in lc: col_map[c] = 'P1'
-        elif 'p2' in lc: col_map[c] = 'P2'
-        elif 'ch3' in lc: col_map[c] = 'CH3'
-        elif 'ch4' in lc: col_map[c] = 'CH4'
-        elif 'ch1' in lc: col_map[c] = 'CH3'
-        elif 'ch2' in lc: col_map[c] = 'CH4'
+        if 'date' in lc:
+            col_map[c] = 'Date'
+        elif 'time' in lc:
+            col_map[c] = 'Time'
+        elif 'p1' in lc:
+            col_map[c] = 'P1'
+        elif 'p2' in lc:
+            col_map[c] = 'P2'
+        elif 'ch3' in lc:
+            col_map[c] = 'Humidity'
+        elif 'ch4' in lc:
+            col_map[c] = 'Temperature'
+        elif 'ch1' in lc:
+            col_map[c] = 'Humidity'
+        elif 'ch2' in lc:
+            col_map[c] = 'Temperature'
     df = df.rename(columns=col_map)
-    # datetime
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df['DateTime'] = pd.to_datetime(df['Date'].dt.strftime('%Y-%m-%d') + ' ' + df['Time'], errors='coerce')
-    parsed[f.name] = df
+    parsed_probes[f.name] = df
 
-dfs = parsed
-# define ranges
+dfs = parsed_probes
+
+# Define ranges per asset
 ranges = {}
 for name, df in dfs.items():
     lname = name.lower()
@@ -99,13 +103,12 @@ for df in dfs.values():
         all_years.update(df['Date'].dt.year.dropna().astype(int).unique())
 all_years = sorted(all_years)
 if not all_years:
-    st.error("No valid dates found in uploaded data.")
+    st.error("No valid dates found.")
     st.stop()
-year = st.sidebar.selectbox("Select Year", all_years)
-months = list(range(1, 13))
-month = st.sidebar.selectbox("Select Month", months, format_func=lambda m: calendar.month_name[m])
+year = st.sidebar.selectbox("Year", all_years)
+month = st.sidebar.selectbox("Month", list(range(1,13)), format_func=lambda m: calendar.month_name[m])
 
-# Main visualization loop
+# Visualization
 for name, df in dfs.items():
     st.header(name)
     sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].copy().reset_index(drop=True)
@@ -115,25 +118,23 @@ for name, df in dfs.items():
     channels = list(ranges[name].keys())
     for ch in channels:
         df_chart = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
-        df_chart['Source'] = 'Probe'
-        # Compute domain
+        df_chart['Value'] = pd.to_numeric(df_chart['Value'], errors='coerce')
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
         low_val, high_val = ranges[name][ch]
         domain_min = min(data_min, low_val)
         domain_max = max(data_max, high_val)
-        # Build chart
         line = alt.Chart(df_chart).mark_line().encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[sel['DateTime'].min(), sel['DateTime'].max()])),
-            y=alt.Y('Value:Q', title=f"{ch}", scale=alt.Scale(domain=[domain_min, domain_max]))
+            y=alt.Y('Value:Q', title=ch + (" (°C)" if "Temp" in ch or "Temperature" in ch else "%RH"), scale=alt.Scale(domain=[domain_min, domain_max]))
         )
-        low_rule = alt.Chart(pd.DataFrame({'y': [low_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
-        high_rule = alt.Chart(pd.DataFrame({'y': [high_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
+        low_rule = alt.Chart(pd.DataFrame({'y':[low_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
+        high_rule = alt.Chart(pd.DataFrame({'y':[high_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
         chart = (line + low_rule + high_rule).properties(
-            title=f"{name} - {ch} | {calendar.month_name[month]} {year}"
+            title=f"{name} - {ch}: {calendar.month_name[month]} {year}"
         )
         st.altair_chart(chart, use_container_width=True)
-    # OOR summary
     st.subheader("Out-of-Range Summary")
-    # (Assuming OOR events were computed earlier and stored)
-
+    # Compute and display OOR summary here
+    
+# End of script
