@@ -105,7 +105,7 @@ for name, df in dfs.items():
     if sel.empty:
         st.warning("No data for selected period.")
         continue
-    ts_df = tempdfs.get(ts_choice) if ts_choice else None
+    ts_df = None  # Tempstick overlay not available
 
     # Plot each channel
     for ch in channels:
