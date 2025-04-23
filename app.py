@@ -22,9 +22,7 @@ tempstick_files = st.sidebar.file_uploader(
 )
 
 # Initialize Tempstick data dictionary
-tempdfs = {}",
-    type=["csv"], accept_multiple_files=True, key="tempstick_uploads"
-)
+tempdfs = {}
 
 # Parse Tempstick CSVs
 # ... [parsing logic unchanged] ...
