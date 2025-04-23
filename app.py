@@ -77,7 +77,22 @@ for name, df in parsed_probes.items():
 dfs = parsed_probes
 
 # Year & Month selection
-# ... [selection logic unchanged] ...
+# Collect available years across all probes
+all_years = set()
+for df in dfs.values():
+    if 'Date' in df.columns:
+        all_years.update(df['Date'].dt.year.dropna().astype(int).unique())
+all_years = sorted(all_years)
+if not all_years:
+    st.error("No valid dates found in uploaded data.")
+    st.stop()
+year = st.sidebar.selectbox("Select Year", all_years)
+# Month selection
+month = st.sidebar.selectbox(
+    "Select Month",
+    list(range(1, 13)),
+    format_func=lambda m: calendar.month_name[m]
+)
 
 # Main visualization loop
 for name, df in dfs.items():
