@@ -107,6 +107,8 @@ for name, df in dfs.items():
         continue
     ts_df = None  # Tempstick overlay not available
 
+    # Determine which channels to plot based on ranges defined
+    channels = list(ranges[name].keys())
     # Plot each channel
     for ch in channels:
         df_chart = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
