@@ -34,7 +34,7 @@ tempstick_files = st.sidebar.file_uploader(
 for name, df in dfs.items():
     st.header(name)
     # ... [metadata inputs unchanged] ...
-    sel = df[(df['Date']...)]  # filtered by year/month
+    sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].copy().reset_index(drop=True)
     if sel.empty:
         st.warning("No data for selected period.")
         continue
