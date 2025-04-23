@@ -27,6 +27,15 @@ tempstick_files = st.sidebar.file_uploader(
 # Parse Probe CSVs
 # ... [parsing logic unchanged] ...
 
+# After parsing probe CSVs, collect them into `dfs`
+# Ensure you have a dictionary `parsed_probes` mapping filenames to DataFrames
+try:
+    parsed_probes
+except NameError:
+    st.error("No parsed probe data found. Make sure probe CSVs are parsed into `parsed_probes`.")
+    st.stop()
+dfs = parsed_probes
+
 # Year & Month selection
 # ... [selection logic unchanged] ...
 
