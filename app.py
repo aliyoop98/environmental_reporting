@@ -144,22 +144,30 @@ for name, df in dfs.items():
         pad = span * 0.1
         ymin = (low if low is not None else data_min) - pad
         ymax = (high if high is not None else data_max) + pad
-        base = alt.Chart(df_chart).encode(
-            x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
-            y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax])),
-            color=alt.Color('Source:N')
-        )
-        line = base.mark_line()
-        if low is not None:
-            low_df = pd.DataFrame({'DateTime': [start_date, end_date], 'value': [low, low]})
-            low_line = alt.Chart(low_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
-            line += low_line
-        if high is not None:
-            high_df = pd.DataFrame({'DateTime': [start_date, end_date], 'value': [high, high]})
-            high_line = alt.Chart(high_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
-            line += high_line
-        chart = line
-        st.altair_chart(
+        base = # compute y-domain to include thresholds and data extremes
+val_min = df_chart['Value'].min()
+val_max = df_chart['Value'].max()
+low_val, high_val = ranges[name][channel]
+domain_min = min(val_min, low_val)
+domain_max = max(val_max, high_val)
+
+# build line chart with dynamic domain and threshold lines
+chart = alt.Chart(df_chart).mark_line().encode(
+    x=alt.X('DateTime:T', title='Date/Time'),
+    y=alt.Y('Value:Q', scale=alt.Scale(domain=[domain_min, domain_max]), title=y_axis_label),
+    color=alt.Color('Source:N', title='Source')
+)
+
+# draw threshold lines
+thresh_df = pd.DataFrame({'threshold': [low_val, high_val]})
+line = alt.Chart(thresh_df).mark_rule(color='red', strokeDash=[5,5]).encode(y='threshold:Q')
+combined = chart + line
+
+# render chart
+st.altair_chart(
+    combined,
+    use_container_width=True
+)(
             chart.properties(
                 title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
             ),
