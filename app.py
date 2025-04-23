@@ -65,14 +65,15 @@ for f in probe_files:
     df = df.rename(columns=col_map)
     parsed_probes[f.name] = df
 
-# After parsing probe CSVs, collect them into `dfs`
-# Ensure you have a dictionary `parsed_probes` mapping filenames to DataFrames them into `dfs`
-# Ensure you have a dictionary `parsed_probes` mapping filenames to DataFrames
-try:
-    parsed_probes
-except NameError:
-    st.error("No parsed probe data found. Make sure probe CSVs are parsed into `parsed_probes`.")
-    st.stop()
+# After parsing probe CSVs, convert Date and build DateTime
+for name, df in parsed_probes.items():
+    df['Date'] = pd.to_datetime(df['Date'], infer_datetime_format=True, errors='coerce')
+    df['DateTime'] = pd.to_datetime(
+        df['Date'].dt.strftime('%Y-%m-%d') + ' ' + df['Time'],
+        infer_datetime_format=True,
+        errors='coerce'
+    )
+# Collect into dfs
 dfs = parsed_probes
 
 # Year & Month selection
