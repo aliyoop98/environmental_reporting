@@ -79,6 +79,34 @@ for name, df in parsed_probes.items():
 # Collect into dfs
 dfs = parsed_probes
 
+# Define default threshold ranges for each file based on type
+ranges = {}
+for name, df in dfs.items():
+    lname = name.lower()
+    has_fridge = 'fridge' in lname
+    has_freezer = 'freezer' in lname
+    is_combo = has_fridge and has_freezer
+    is_room = not (has_fridge or has_freezer)
+    is_olympus = 'olympus' in lname
+    r = {}
+    if is_combo:
+        if 'P1' in df.columns:
+            r['P1'] = (2, 8)
+        if 'P2' in df.columns:
+            r['P2'] = (-35, -5)
+    elif has_fridge and not has_freezer:
+        if 'P1' in df.columns:
+            r['P1'] = (2, 8)
+    elif has_freezer and not has_fridge:
+        if 'P1' in df.columns:
+            r['P1'] = (-35, -5)
+    elif is_room:
+        if 'CH3' in df.columns:
+            r['CH3'] = (0, 60)
+        if 'CH4' in df.columns:
+            r['CH4'] = (15, 28 if is_olympus else 25)
+    ranges[name] = r
+
 # Year & Month selection
 # Collect available years across all probes
 all_years = set()
