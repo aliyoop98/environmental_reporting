@@ -74,4 +74,66 @@ for f in probe_files:
 dfs = parsed
 # define ranges
 ranges = {}
-for name, df in d...
+for name, df in dfs.items():
+    lname = name.lower()
+    has_fridge = 'fridge' in lname
+    has_freezer = 'freezer' in lname
+    is_combo = has_fridge and has_freezer
+    is_room = not (has_fridge or has_freezer)
+    is_olympus = 'olympus' in lname
+    if is_combo:
+        ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
+    elif has_fridge:
+        ranges[name] = {'Temperature': (2, 8)}
+    elif has_freezer:
+        ranges[name] = {'Temperature': (-35, -5)}
+    elif is_room and is_olympus:
+        ranges[name] = {'Humidity': (0, 60), 'Temperature': (15, 28)}
+    else:
+        ranges[name] = {'Humidity': (0, 60), 'Temperature': (15, 25)}
+
+# Year & Month selection
+all_years = set()
+for df in dfs.values():
+    if 'Date' in df.columns:
+        all_years.update(df['Date'].dt.year.dropna().astype(int).unique())
+all_years = sorted(all_years)
+if not all_years:
+    st.error("No valid dates found in uploaded data.")
+    st.stop()
+year = st.sidebar.selectbox("Select Year", all_years)
+months = list(range(1, 13))
+month = st.sidebar.selectbox("Select Month", months, format_func=lambda m: calendar.month_name[m])
+
+# Main visualization loop
+for name, df in dfs.items():
+    st.header(name)
+    sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].copy().reset_index(drop=True)
+    if sel.empty:
+        st.warning(f"No data for {name} in {calendar.month_name[month]} {year}.")
+        continue
+    channels = list(ranges[name].keys())
+    for ch in channels:
+        df_chart = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
+        df_chart['Source'] = 'Probe'
+        # Compute domain
+        data_min = df_chart['Value'].min()
+        data_max = df_chart['Value'].max()
+        low_val, high_val = ranges[name][ch]
+        domain_min = min(data_min, low_val)
+        domain_max = max(data_max, high_val)
+        # Build chart
+        line = alt.Chart(df_chart).mark_line().encode(
+            x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[sel['DateTime'].min(), sel['DateTime'].max()])),
+            y=alt.Y('Value:Q', title=f"{ch}", scale=alt.Scale(domain=[domain_min, domain_max]))
+        )
+        low_rule = alt.Chart(pd.DataFrame({'y': [low_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
+        high_rule = alt.Chart(pd.DataFrame({'y': [high_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
+        chart = (line + low_rule + high_rule).properties(
+            title=f"{name} - {ch} | {calendar.month_name[month]} {year}"
+        )
+        st.altair_chart(chart, use_container_width=True)
+    # OOR summary
+    st.subheader("Out-of-Range Summary")
+    # (Assuming OOR events were computed earlier and stored)
+
