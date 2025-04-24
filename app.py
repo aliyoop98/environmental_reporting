@@ -34,10 +34,30 @@ for f in tempstick_files or []:
     if not ts_col:
         continue
     df_ts['DateTime'] = pd.to_datetime(df_ts[ts_col], errors='coerce')
-    for col in ['Temperature', 'Humidity']:
-        if col in df_ts.columns:
-            df_ts[col] = pd.to_numeric(df_ts[col], errors='coerce')
-    tempdfs[f.name] = df_ts[['DateTime'] + [c for c in ['Temperature', 'Humidity'] if c in df_ts.columns]]
+    
+    # Detect temperature and humidity columns
+    temp_col = next((c for c in df_ts.columns if 'temperature' in c.lower()), None)
+    humidity_col = next((c for c in df_ts.columns if 'humidity' in c.lower()), None)
+    
+    if temp_col:
+        df_ts[temp_col] = pd.to_numeric(df_ts[temp_col], errors='coerce')
+    if humidity_col:
+        df_ts[humidity_col] = pd.to_numeric(df_ts[humidity_col], errors='coerce')
+    
+    # Select and rename columns
+    selected_cols = []
+    if temp_col:
+        selected_cols.append(temp_col)
+    if humidity_col:
+        selected_cols.append(humidity_col)
+    df_ts = df_ts[['DateTime'] + selected_cols]
+    
+    if temp_col:
+        df_ts = df_ts.rename(columns={temp_col: 'Temperature'})
+    if humidity_col:
+        df_ts = df_ts.rename(columns={humidity_col: 'Humidity'})
+    
+    tempdfs[f.name] = df_ts
 
 # Parse Probe CSVs
 parsed_probes = {}
@@ -61,17 +81,27 @@ for f in probe_files:
             col_map[c] = 'P1'
         elif 'p2' in lc:
             col_map[c] = 'P2'
-        elif 'ch3' in lc:
+        elif 'ch3' in lc or 'humidity' in lc:
             col_map[c] = 'Humidity'
-        elif 'ch4' in lc:
+        elif 'ch4' in lc or 'temperature' in lc:
             col_map[c] = 'Temperature'
         elif 'ch1' in lc:
             col_map[c] = 'Humidity'
         elif 'ch2' in lc:
             col_map[c] = 'Temperature'
     df = df.rename(columns=col_map)
+    
+    # Rename P1/P2 for combo units
+    lname = f.name.lower()
+    is_combo = 'fridge' in lname and 'freezer' in lname
+    if is_combo:
+        df = df.rename(columns={'P1': 'Fridge Temp', 'P2': 'Freezer Temp'})
+    
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df['DateTime'] = pd.to_datetime(df['Date'].dt.strftime('%Y-%m-%d') + ' ' + df['Time'], errors='coerce')
+    df['DateTime'] = pd.to_datetime(
+        df['Date'].dt.strftime('%Y-%m-%d') + ' ' + df['Time'], 
+        errors='coerce'
+    )
     parsed_probes[f.name] = df
 
 dfs = parsed_probes
@@ -85,6 +115,7 @@ for name, df in dfs.items():
     is_combo = has_fridge and has_freezer
     is_room = not (has_fridge or has_freezer)
     is_olympus = 'olympus' in lname
+    
     if is_combo:
         ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
     elif has_fridge:
@@ -117,8 +148,14 @@ for name, df in dfs.items():
         continue
     channels = list(ranges[name].keys())
     for ch in channels:
+        if ch not in sel.columns:
+            st.warning(f"Channel {ch} not found in data for {name}. Skipping...")
+            continue
         df_chart = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
-        df_chart['Value'] = pd.to_numeric(df_chart['Value'], errors='coerce')
+        df_chart['Value'] = pd.to_numeric(df_chart['Value'], errors='coerce').dropna()
+        if df_chart.empty:
+            st.warning(f"No valid data for {ch} in {name}.")
+            continue
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
         low_val, high_val = ranges[name][ch]
@@ -126,7 +163,8 @@ for name, df in dfs.items():
         domain_max = max(data_max, high_val)
         line = alt.Chart(df_chart).mark_line().encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[sel['DateTime'].min(), sel['DateTime'].max()])),
-            y=alt.Y('Value:Q', title=ch + (" (°C)" if "Temp" in ch or "Temperature" in ch else "%RH"), scale=alt.Scale(domain=[domain_min, domain_max]))
+            y=alt.Y('Value:Q', title=ch + (" (°C)" if "Temp" in ch or "Temperature" in ch else "%RH"), 
+                    scale=alt.Scale(domain=[domain_min, domain_max]))
         )
         low_rule = alt.Chart(pd.DataFrame({'y':[low_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
         high_rule = alt.Chart(pd.DataFrame({'y':[high_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
@@ -136,5 +174,5 @@ for name, df in dfs.items():
         st.altair_chart(chart, use_container_width=True)
     st.subheader("Out-of-Range Summary")
     # Compute and display OOR summary here
-    
+
 # End of script
