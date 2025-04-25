@@ -144,6 +144,7 @@ for name, df in dfs.items():
             alt.Chart(pd.DataFrame({'y':[high]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y:Q')
         ]
         chart = alt.layer(line, *rules).properties(
-            title=f"{chart_title} | Materials: {materials.replace('', ' ') or 'None'} | Probe ID: {probe_id} | Equipment: {equipment_id} | {ch} Range [{low}, {high}]"
+            title=f"{chart_title} | Materials: {materials.replace('
+', ' ') or 'None'} | Probe ID: {probe_id} | Equipment: {equipment_id} | {ch} Range [{low}, {high}]"
         )
         st.altair_chart(chart, use_container_width=True)
