@@ -81,24 +81,24 @@ for f in probe_files:
             col_map[c] = 'Temperature'
     df = df.rename(columns=col_map)
     
-    # Rename P1/P2 for combo units
     lname = f.name.lower()
     is_combo = 'fridge' in lname and 'freezer' in lname
     if is_combo:
         df = df.rename(columns={'P1': 'Fridge Temp', 'P2': 'Freezer Temp'})
     
-    # Parse dates and times
-    df['Date'] = pd.to_datetime(df['Date'], format='%Y-%m-%d', errors='coerce')
-    df['DateTime'] = pd.to_datetime(
-        df['Date'].dt.strftime('%Y-%m-%d') + ' ' + df['Time'],
-        format='%Y-%m-%d %H:%M:%S',
-        errors='coerce'
-    )
-    parsed_probes[f.name] = df
+    if 'Date' in df.columns and 'Time' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df['DateTime'] = pd.to_datetime(
+            df['Date'].dt.strftime('%Y-%m-%d') + ' ' + df['Time'],
+            format='%Y-%m-%d %H:%M:%S',
+            errors='coerce'
+        )
+        parsed_probes[f.name] = df
 
+# Combine all
 dfs = {**parsed_probes, **tempdfs}
 
-# Define ranges per asset (unchanged)
+# Define ranges
 ranges = {}
 for name, df in dfs.items():
     lname = name.lower()
@@ -119,17 +119,27 @@ for name, df in dfs.items():
     else:
         ranges[name] = {'Humidity': (0, 60), 'Temperature': (15, 25)}
 
-# Year & Month selection (unchanged)
-all_years = sorted({df['Date'].dt.year.dropna().astype(int).unique()[0] for df in dfs.values() if not df.empty})
-if not all_years:
-    st.error("No valid dates found.")
-    st.stop()
-year = st.sidebar.selectbox("Year", all_years)
-month = st.sidebar.selectbox("Month", list(range(1,13)), format_func=lambda m: calendar.month_name[m])
+# Safe year list
+all_years = sorted({
+    int(year)
+    for df in dfs.values()
+    if 'Date' in df.columns and pd.api.types.is_datetime64_any_dtype(df['Date'])
+    for year in df['Date'].dropna().dt.year.unique()
+})
 
-# Visualization (with critical fixes)
+if not all_years:
+    st.error("No valid years found in uploaded files.")
+    st.stop()
+
+year = st.sidebar.selectbox("Year", all_years)
+month = st.sidebar.selectbox("Month", list(range(1, 13)), format_func=lambda m: calendar.month_name[m])
+
+# Visualization
 for name, df in dfs.items():
     st.header(name)
+    if 'Date' not in df.columns:
+        st.warning(f"No 'Date' column found for {name}. Skipping...")
+        continue
     sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].copy().reset_index(drop=True)
     if sel.empty:
         st.warning(f"No data for {name} in {calendar.month_name[month]} {year}.")
@@ -140,11 +150,8 @@ for name, df in dfs.items():
             st.warning(f"Channel {ch} not found in data for {name}. Skipping...")
             continue
         df_chart = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
-        # Fix: Use .squeeze() to ensure input is a Series
-        df_chart['Value'] = pd.to_numeric(
-            df_chart['Value'].squeeze(),  # Convert to Series if needed
-            errors='coerce'
-        ).dropna()
+        df_chart['Value'] = pd.to_numeric(df_chart['Value'], errors='coerce').dropna()
+        df_chart = df_chart.dropna(subset=['DateTime'])
         if df_chart.empty:
             st.warning(f"No valid data for {ch} in {name}.")
             continue
@@ -158,8 +165,8 @@ for name, df in dfs.items():
             y=alt.Y('Value:Q', title=ch + (" (°C)" if "Temp" in ch else "%RH"), 
                     scale=alt.Scale(domain=[domain_min, domain_max]))
         )
-        low_rule = alt.Chart(pd.DataFrame({'y': [low_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
-        high_rule = alt.Chart(pd.DataFrame({'y': [high_val]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
+        low_rule = alt.Chart(pd.DataFrame({'y': [low_val]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')
+        high_rule = alt.Chart(pd.DataFrame({'y': [high_val]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')
         chart = (line + low_rule + high_rule).properties(
             title=f"{name} - {ch}: {calendar.month_name[month]} {year}"
         )
