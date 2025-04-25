@@ -81,6 +81,36 @@ for f in probe_files:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
     dfs[name] = df.reset_index(drop=True)
+# ——————— TEMPSTICK UPLOADER & DEBUG ———————
+uploaded_ts = st.sidebar.file_uploader(
+    "Upload Tempstick CSV files (optional)",
+    type=["csv"],
+    accept_multiple_files=True,
+    key="tempstick_uploader"
+)
+
+# Debug: list out what Streamlit actually sees
+if uploaded_ts is not None:
+    st.sidebar.write("Tempstick files:", [f.name for f in uploaded_ts])
+
+# Only parse & show selector if we truly have files
+tempdfs = {}
+if uploaded_ts:
+    for ts_file in uploaded_ts:
+        # Quick read (no stripping) just to confirm upload
+        df = pd.read_csv(ts_file, on_bad_lines="skip")
+        tempdfs[ts_file.name] = df
+
+if tempdfs:
+    ts_choice = st.sidebar.selectbox(
+        "Select Tempstick to overlay",
+        options=list(tempdfs.keys()),
+        key="tempstick_choice"
+    )
+    st.sidebar.write(f"Overlaying: {ts_choice}")
+    ts_df = tempdfs[ts_choice]
+else:
+    ts_df = None
 
 # Year & Month Selection
 years = sorted({d.year for df in dfs.values() for d in df['Date'].dropna()})
