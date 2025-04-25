@@ -139,13 +139,19 @@ for name, df in dfs.items():
             ts_sub['Source'] = 'Tempstick'
             df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
         df_chart = df_chart.dropna(subset=['Value'])
-        # Fit Y-axis to actual data with padding
+        # Determine axis bounds: include full acceptable range or data range
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
-        span = (data_max - data_min) or 1
+        if ch in ranges[name]:
+            lo, hi = ranges[name][ch]
+        else:
+            lo, hi = data_min, data_max
+        raw_min = min(data_min, lo)
+        raw_max = max(data_max, hi)
+        span = (raw_max - raw_min) or 1
         pad = span * 0.1
-        ymin = data_min - pad
-        ymax = data_max + pad
+        ymin = raw_min - pad
+        ymax = raw_max + pad
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
             y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
@@ -153,21 +159,16 @@ for name, df in dfs.items():
         )
         line = base.mark_line()
         layers = [line]
+        # Add horizontal limit lines
         if ch in ranges[name]:
             lo, hi = ranges[name][ch]
             if lo is not None:
-                lo_df = pd.DataFrame({'y': [lo]})
                 layers.append(
-                    alt.Chart(lo_df).mark_rule(color='red', strokeDash=[4,4]).encode(
-                        y='y:Q'
-                    )
+                    alt.Chart(pd.DataFrame({'y': [lo]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
                 )
             if hi is not None:
-                hi_df = pd.DataFrame({'y': [hi]})
                 layers.append(
-                    alt.Chart(hi_df).mark_rule(color='red', strokeDash=[4,4]).encode(
-                        y='y:Q'
-                    )
+                    alt.Chart(pd.DataFrame({'y': [hi]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
                 )
         chart = alt.layer(*layers).properties(
             title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
