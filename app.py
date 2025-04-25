@@ -99,8 +99,16 @@ for name, df in dfs.items():
     materials = col1.text_area('Materials', key=f"{name}_materials")
     probe_id = col2.text_input('Probe ID', key=f"{name}_probe")
     equipment_id = col2.text_input('Equipment ID', key=f"{name}_equip")
-    ts_choice = col1.selectbox('Tempstick to overlay', options=[None]+list(tempdfs.keys()), key=f"{name}_ts")
-    ts_df = tempdfs.get(ts_choice)
+    ts_df = None
+    if tempdfs:
+        ts_choice = col1.selectbox(
+            'Tempstick to overlay',
+            options=[None] + list(tempdfs.keys()),
+            key=f"{name}_ts"
+        )
+        ts_df = tempdfs.get(ts_choice)
+    else:
+        col1.info("Upload Tempstick CSV files to overlay.")
 
     sel = df[(df['Date'].dt.year==year)&(df['Date'].dt.month==month)].sort_values('DateTime')
     if sel.empty:
@@ -136,6 +144,7 @@ for name, df in dfs.items():
             alt.Chart(pd.DataFrame({'y':[high]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y:Q')
         ]
         chart = alt.layer(line, *rules).properties(
-    title=f"{chart_title} | Materials: {materials} | Probe ID: {probe_id} | Equipment: {equipment_id} | {ch} Range [{low}, {high}]"
-)
+            title=f"{chart_title} | Materials: {materials.replace('
+', ' ') or 'None'} | Probe ID: {probe_id} | Equipment: {equipment_id} | {ch} Range [{low}, {high}]"
+        )
         st.altair_chart(chart, use_container_width=True)
