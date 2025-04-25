@@ -136,5 +136,6 @@ for name, df in dfs.items():
             alt.Chart(pd.DataFrame({'y':[high]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y:Q')
         ]
         chart = alt.layer(line, *rules).properties(
-            title=f"{chart_title} | {ch} Range [{low}, {high}] | Probe ID: {probe_id} | Equipment: {equipment_id}"        )
+    title=f"{chart_title} | Materials: {materials} | Probe ID: {probe_id} | Equipment: {equipment_id} | {ch} Range [{low}, {high}]"
+)
         st.altair_chart(chart, use_container_width=True)
