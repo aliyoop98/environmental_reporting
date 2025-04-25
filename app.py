@@ -25,9 +25,48 @@ tempstick_files = st.sidebar.file_uploader(
 # ... [parsing logic unchanged] ...
 
 # Parse Probe CSVs
-# ... [parsing logic unchanged] ...
+parsed_probes = {}
+for f in probe_files:
+    raw_bytes = f.read()
+    text = raw_bytes.decode('utf-8', errors='ignore')
+    lines = text.splitlines(True)
+    try:
+        header_idx = max(i for i, line in enumerate(lines)
+                         if 'ch1' in line.lower() or 'p1' in line.lower())
+    except ValueError:
+        st.warning(f"No valid header row found in {f.name}, skipping.")
+        continue
+    csv_text = ''.join(lines[header_idx:])
+    try:
+        df = pd.read_csv(io.StringIO(csv_text), on_bad_lines='skip', skip_blank_lines=True)
+    except Exception as e:
+        st.error(f"Failed to parse {f.name}: {e}")
+        continue
+    df.columns = [c.strip() for c in df.columns]
+    col_map = {}
+    for c in df.columns:
+        lc = c.lower()
+        if 'date' in lc:
+            col_map[c] = 'Date'
+        elif 'time' in lc:
+            col_map[c] = 'Time'
+        elif 'p1' in lc:
+            col_map[c] = 'P1'
+        elif 'p2' in lc:
+            col_map[c] = 'P2'
+        elif 'ch3' in lc:
+            col_map[c] = 'CH3'
+        elif 'ch4' in lc:
+            col_map[c] = 'CH4'
+        elif 'ch1' in lc:
+            col_map[c] = 'CH3'
+        elif 'ch2' in lc:
+            col_map[c] = 'CH4'
+    df = df.rename(columns=col_map)
+    parsed_probes[f.name] = df
 
 # After parsing probe CSVs, collect them into `dfs`
+# Ensure you have a dictionary `parsed_probes` mapping filenames to DataFrames them into `dfs`
 # Ensure you have a dictionary `parsed_probes` mapping filenames to DataFrames
 try:
     parsed_probes
