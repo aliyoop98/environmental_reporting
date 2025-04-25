@@ -137,9 +137,9 @@ for name, df in dfs.items():
         if ts_df is not None and ch in ts_df.columns:
             ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
             ts_sub['Source'] = 'Tempstick'
-            df_chart = pd.concat([probe_sub, ts_sub], ignore_index=True)
+            df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
         df_chart = df_chart.dropna(subset=['Value'])
-        # Dynamically fit Y-axis to data only
+        # Fit Y-axis to actual data with padding
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
         span = (data_max - data_min) or 1
@@ -156,17 +156,17 @@ for name, df in dfs.items():
         if ch in ranges[name]:
             lo, hi = ranges[name][ch]
             if lo is not None:
-                lo_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [lo, lo]})
+                lo_df = pd.DataFrame({'y': [lo]})
                 layers.append(
                     alt.Chart(lo_df).mark_rule(color='red', strokeDash=[4,4]).encode(
-                        x='DateTime:T', y='Value:Q'
+                        y='y:Q'
                     )
                 )
             if hi is not None:
-                hi_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [hi, hi]})
+                hi_df = pd.DataFrame({'y': [hi]})
                 layers.append(
                     alt.Chart(hi_df).mark_rule(color='red', strokeDash=[4,4]).encode(
-                        x='DateTime:T', y='Value:Q'
+                        y='y:Q'
                     )
                 )
         chart = alt.layer(*layers).properties(
