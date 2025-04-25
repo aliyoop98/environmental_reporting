@@ -131,26 +131,21 @@ for name, df in dfs.items():
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
     for ch in channels:
-        # Combine Probe and Tempstick
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
         probe_sub['Source'] = 'Probe'
         df_chart = probe_sub.copy()
         if ts_df is not None and ch in ts_df.columns:
             ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
             ts_sub['Source'] = 'Tempstick'
-            df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
+            df_chart = pd.concat([probe_sub, ts_sub], ignore_index=True)
         df_chart = df_chart.dropna(subset=['Value'])
-
-        # Fit Y-axis to actual data with padding
+        # Dynamically fit Y-axis to data only
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
-        if data_max == data_min:
-            pad = data_min * 0.1 if data_min != 0 else 1
-        else:
-            pad = (data_max - data_min) * 0.1
+        span = (data_max - data_min) or 1
+        pad = span * 0.1
         ymin = data_min - pad
         ymax = data_max + pad
-
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
             y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
@@ -158,8 +153,6 @@ for name, df in dfs.items():
         )
         line = base.mark_line()
         layers = [line]
-
-        # Add limit lines if defined
         if ch in ranges[name]:
             lo, hi = ranges[name][ch]
             if lo is not None:
@@ -176,13 +169,10 @@ for name, df in dfs.items():
                         x='DateTime:T', y='Value:Q'
                     )
                 )
-
         chart = alt.layer(*layers).properties(
             title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         )
         st.altair_chart(chart, use_container_width=True)
-
-    # Out-of-Range Events Table
     st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
         lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])), axis=1
