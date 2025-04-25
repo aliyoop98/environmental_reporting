@@ -1,209 +1,193 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
 import io
-from pandas.tseries.offsets import MonthEnd
+import calendar
+import altair as alt
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Environmental Reporting", layout="wide")
-st.title("Environmental Monitoring Dashboard")
+st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="📈")
 
-# --- SIDEBAR: UPLOADS & CONTROLS ---
-st.sidebar.header("Data Upload & Settings")
-
-# 1) Probe CSVs
+# Sidebar configuration
+st.sidebar.header("Data Upload & Configuration")
 probe_files = st.sidebar.file_uploader(
-    "Upload Probe CSV files",
-    type="csv",
-    accept_multiple_files=True,
-    key="probe_uploader"
+    "Upload Probe CSV files", type=["csv"], accept_multiple_files=True
 )
-
-# 2) Tempstick CSVs (optional)
-ts_files = st.sidebar.file_uploader(
-    "Upload Tempstick CSV files (optional)",
-    type="csv",
-    accept_multiple_files=True,
-    key="ts_uploader"
-)
-
-# Parse Tempsticks
-tempdfs = {}
-if ts_files:
-    for ts in ts_files:
-        raw = ts.getvalue().decode(errors="ignore").splitlines()
-        hdr = max(i for i, L in enumerate(raw) if "timestamp" in L.lower())
-        content = "\n".join(raw[hdr:])
-        df_ts = pd.read_csv(io.StringIO(content), on_bad_lines="skip", skip_blank_lines=True)
-        df_ts.columns = [c.strip() for c in df_ts.columns]
-        colmap = {
-            **{c: "DateTime"  for c in df_ts.columns if "timestamp" in c.lower()},
-            **{c: "Temperature" for c in df_ts.columns if "temperature" in c.lower()},
-            **{c: "Humidity"    for c in df_ts.columns if "humidity" in c.lower()},
-        }
-        df_ts = df_ts.rename(columns=colmap)
-        keep = [c for c in ("DateTime","Temperature","Humidity") if c in df_ts.columns]
-        df_ts = df_ts[keep].copy()
-        df_ts["DateTime"] = pd.to_datetime(df_ts["DateTime"], errors="coerce")
-        df_ts["Temperature"] = pd.to_numeric(df_ts["Temperature"], errors="coerce")
-        if "Humidity" in df_ts:
-            df_ts["Humidity"] = pd.to_numeric(df_ts["Humidity"], errors="coerce")
-        tempdfs[ts.name] = df_ts
-
-if tempdfs:
-    ts_choice = st.sidebar.selectbox("Select Tempstick to overlay", list(tempdfs.keys()), key="ts_choice")
-    ts_df = tempdfs[ts_choice]
-else:
-    ts_df = None
-
-# --- PARSE PROBE CSVs ---
-parsed_probes = {}
-for f in probe_files or []:
-    raw = f.getvalue().decode(errors="ignore").splitlines()
-    hdr = max(i for i, L in enumerate(raw) if "ch1" in L.lower() or "p1" in L.lower())
-    content = "\n".join(raw[hdr:])
-    df = pd.read_csv(io.StringIO(content), on_bad_lines="skip", skip_blank_lines=True)
-    df.columns = [c.strip() for c in df.columns]
-    colmap = {}
-    for c in df.columns:
-        lc = c.lower()
-        if "date" in lc:       colmap[c] = "Date"
-        elif "time" in lc:     colmap[c] = "Time"
-        elif "p1" in lc:       colmap[c] = "P1"
-        elif "p2" in lc:       colmap[c] = "P2"
-        elif "ch3" in lc:      colmap[c] = "CH3"
-        elif "ch4" in lc:      colmap[c] = "CH4"
-    df = df.rename(columns=colmap)
-
-    name = f.name.lower()
-    is_fridge = "fridge" in name and "freezer" not in name
-    is_freezer= "freezer" in name and "fridge" not in name
-    is_combo  = "fridge" in name and "freezer" in name
-    is_olympus= "olympus" in name
-
-    if is_combo:
-        df = df[[c for c in ("P1","P2","Date","Time") if c in df.columns]]
-        df = df.rename(columns={"P1":"Fridge Temp","P2":"Freezer Temp"})
-    elif is_fridge or is_freezer:
-        df = df[[c for c in ("P1","Date","Time") if c in df.columns]]
-        df = df.rename(columns={"P1":"Temperature"})
-    else:
-        hum = "CH3" if "CH3" in df.columns else None
-        tmp = "CH4" if "CH4" in df.columns else None
-        if not tmp and "CH2" in df.columns: tmp = "CH2"
-        keep = [c for c in (hum,tmp,"Date","Time") if c]
-        df = df[keep]
-        df = df.rename(columns={hum:"Humidity",tmp:"Temperature"})
-
-    df["Date"]     = pd.to_datetime(df["Date"], errors="coerce")
-    df["DateTime"] = pd.to_datetime(df["Date"].dt.strftime("%Y-%m-%d")+" "+df["Time"], errors="coerce")
-    parsed_probes[f.name] = df
-
-if not parsed_probes:
-    st.error("Upload at least one probe CSV.")
+if not probe_files:
+    st.sidebar.info("Upload Probe CSV files to begin.")
     st.stop()
 
-# --- YEAR & MONTH SELECTORS ---
-all_dt = pd.concat([df["DateTime"] for df in parsed_probes.values()])
-years = sorted(all_dt.dt.year.dropna().unique().astype(int).tolist())
-year = st.sidebar.selectbox("Year", years, index=len(years)-1)
-months = list(range(1,13))
-default_month = int(all_dt.dt.month.max()) if year==years[-1] else 1
-month = st.sidebar.selectbox("Month", months, index=months.index(default_month))
+tempstick_files = st.sidebar.file_uploader(
+    "Upload Tempstick CSV files (optional)",
+    type=["csv"], accept_multiple_files=True, key="tempstick_uploads"
+)
 
-# --- THRESHOLD RANGES ---
-ranges = {}
-for name, df in parsed_probes.items():
-    L = name.lower()
-    if "fridge" in L and "freezer" not in L:
-        ranges[name] = {"Temperature":(2.0,8.0)}
-    elif "freezer" in L and "fridge" not in L:
-        ranges[name] = {"Temperature":(-35.0,-5.0)}
-    elif "fridge" in L and "freezer" in L:
-        ranges[name] = {"Fridge Temp":(2.0,8.0),"Freezer Temp":(-35.0,-5.0)}
-    elif "olympus" in L:
-        ranges[name] = {"Temperature":(15.0,28.0),"Humidity":(0.0,60.0)}
-    else:
-        ranges[name] = {"Temperature":(15.0,25.0),"Humidity":(0.0,60.0)}
-
-# --- MAIN LOOP: EVENTS & CHARTS ---
-for name, df in parsed_probes.items():
-    with st.expander(name, expanded=True):
-        # Metadata inputs
-        title    = st.text_input("Chart Title", value=f"{name} {pd.Timestamp(year,month,1).strftime('%B %Y')}", key=f"{name}_title")
-        materials= st.text_area("Materials", key=f"{name}_materials")
-        pid      = st.text_input("Probe ID", key=f"{name}_probe")
-        eid      = st.text_input("Equipment ID", key=f"{name}_equip")
-
-        # filter by month
-        sel = df[(df["DateTime"].dt.year==year)&(df["DateTime"].dt.month==month)].reset_index(drop=True)
-        if sel.empty:
-            st.warning(f"No data for {year}-{month:02d}")
+# Parse Tempstick CSVs
+tempdfs = {}
+if tempstick_files:
+    for f in tempstick_files:
+        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
+        try:
+            idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
+        except ValueError:
             continue
+        csv_text = ''.join(raw[idx:])
+        df_ts = pd.read_csv(io.StringIO(csv_text), on_bad_lines='skip').rename(columns=str.strip)
+        ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
+        if not ts_col:
+            continue
+        df_ts = df_ts.rename(columns={ts_col: 'DateTime'})
+        df_ts['DateTime'] = pd.to_datetime(df_ts['DateTime'], infer_datetime_format=True, errors='coerce')
+        temp_col = next((c for c in df_ts.columns if 'temp' in c.lower()), None)
+        if temp_col:
+            df_ts['Temperature'] = pd.to_numeric(df_ts[temp_col].astype(str).str.replace('+',''), errors='coerce')
+        hum_col = next((c for c in df_ts.columns if 'hum' in c.lower()), None)
+        if hum_col:
+            df_ts['Humidity'] = pd.to_numeric(df_ts[hum_col].astype(str).str.replace('+',''), errors='coerce')
+        cols = ['DateTime']
+        if 'Temperature' in df_ts.columns:
+            cols.append('Temperature')
+        if 'Humidity' in df_ts.columns:
+            cols.append('Humidity')
+        tempdfs[f.name] = df_ts[cols]
 
-        # OUT-OF-RANGE DETECTION
-        low_high = ranges[name]
-        def flag(r):
-            v = pd.to_numeric(r["Value"], errors="coerce") if False else None
-            return False
+# Parse Probe CSVs
+dfs = {}
+ranges = {}
+for f in probe_files:
+    name = f.name
+    raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
+    try:
+        idx = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
+    except ValueError:
+        continue
+    content = ''.join(raw[idx:])
+    df = pd.read_csv(io.StringIO(content), on_bad_lines='skip').rename(columns=str.strip)
+    lname = name.lower()
+    has_fridge = 'fridge' in lname
+    has_freezer = 'freezer' in lname
+    if has_fridge and has_freezer:
+        mapping = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
+        ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
+    elif has_fridge:
+        mapping = {'Temperature': 'P1'}
+        ranges[name] = {'Temperature': (2, 8)}
+    elif has_freezer:
+        mapping = {'Temperature': 'P1'}
+        ranges[name] = {'Temperature': (-35, -5)}
+    else:
+        cols_lower = [c.lower() for c in df.columns]
+        if any('ch4' in c for c in cols_lower):
+            mapping = {'Humidity': 'CH3', 'Temperature': 'CH4'}
+        else:
+            mapping = {'Humidity': 'CH1', 'Temperature': 'CH2'}
+        temp_range = (15, 28) if 'olympus' in lname else (15, 25)
+        ranges[name] = {'Temperature': temp_range, 'Humidity': (0, 60)}
+    mapping.update({'Date': 'Date', 'Time': 'Time'})
+    col_map = {}
+    for new, key in mapping.items():
+        col = next((c for c in df.columns if key.lower() in c.lower()), None)
+        if col:
+            col_map[col] = new
+    df = df[list(col_map)].rename(columns=col_map)
+    df['Date'] = pd.to_datetime(df['Date'], infer_datetime_format=True, errors='coerce')
+    df['DateTime'] = pd.to_datetime(
+        df['Date'].dt.strftime('%Y-%m-%d ') + df['Time'].astype(str),
+        errors='coerce'
+    )
+    for c in df.columns.difference(['Date', 'Time', 'DateTime']):
+        df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
+    dfs[name] = df.reset_index(drop=True)
 
-        # Prepare numeric columns for each channel separately
-        out_events = {}
-        for ch,(low,high) in low_high.items():
-            sel_ch = sel[["DateTime",ch]].rename(columns={ch:"Value"}).copy()
-            sel_ch["Value"] = pd.to_numeric(sel_ch["Value"],errors="coerce")
-            sel_ch["OOR"] = sel_ch["Value"].apply(lambda v: pd.notna(v) and (v<low or v>high))
-            # group contiguous
-            sel_ch["GroupID"] = (sel_ch["OOR"]!=sel_ch["OOR"].shift(1,False)).cumsum()
-            evs=[]
-            for gid,grp in sel_ch[sel_ch["OOR"]].groupby("GroupID"):
-                start = grp["DateTime"].iloc[0]
-                idx_end = grp.index[-1]
-                if idx_end+1<len(sel_ch):
-                    end = sel_ch.at[idx_end+1,"DateTime"]
-                else:
-                    end = grp["DateTime"].iloc[-1]
-                dur = (end-start).total_seconds()/60.0
-                evs.append({"GroupID":gid,"Start":start,"End":end,"Duration (min)":dur})
-            ev_df = pd.DataFrame(evs)
-            total = ev_df["Duration (min)"].sum() if not ev_df.empty else 0.0
-            incident = total>=60 or any(ev_df["Duration (min)"]>=60)
-            out_events[ch] = (ev_df,total,incident)
+# Year & Month selection
+years = sorted({dt.year for df in dfs.values() for dt in df['Date'].dropna()})
+months = sorted({dt.month for df in dfs.values() for dt in df['Date'].dropna()})
+year = st.sidebar.selectbox("Year", years)
+month = st.sidebar.selectbox(
+    "Month", months,
+    format_func=lambda m: calendar.month_name[m]
+)
 
-            st.subheader(f"Out-of-Range Events: {ch}")
-            st.table(ev_df)
-            st.markdown(f"**Total OOR minutes:** {total:.1f} — **Incident:** {'YES' if incident else 'No'}")
-
-        # PLOTTING
-        for ch,(low,high) in low_high.items():
-            # combine probe + tempstick
-            probe = sel[["DateTime",ch]].rename(columns={ch:"Value"}).assign(Source="Probe")
-            if ts_df is not None and ch in ts_df.columns:
-                ts_sel = ts_df[(ts_df["DateTime"].dt.year==year)&(ts_df["DateTime"].dt.month==month)]
-                ts_sel = ts_sel[["DateTime",ch]].rename(columns={ch:"Value"}).assign(Source="Tempstick")
-                chart_df = pd.concat([probe,ts_sel],ignore_index=True)
-            else:
-                chart_df = probe
-
-            chart_df["Value"] = pd.to_numeric(chart_df["Value"],errors="coerce")
-            chart_df = chart_df.dropna(subset=["Value"])
-
-            dmin = chart_df["Value"].min()
-            dmax = chart_df["Value"].max()
-            domain_min = min(dmin, low) if pd.notna(dmin) else low
-            domain_max = max(dmax, high) if pd.notna(dmax) else high
-
-            base = alt.Chart(chart_df).encode(
-                x=alt.X("DateTime:T", title="Date/Time",
-                        scale=alt.Scale(domain=[
-                            pd.Timestamp(year,month,1),
-                            pd.Timestamp(year,month,1)+MonthEnd(0)
-                        ])),
-                y=alt.Y("Value:Q", title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})",
-                        scale=alt.Scale(domain=[domain_min,domain_max]))
-            )
-            line = base.mark_line().encode(color=alt.Color("Source:N",title="Series"))
-            rules = alt.Chart(pd.DataFrame({"y":[low,high]})).mark_rule(strokeDash=[5,5],color="red").encode(y="y:Q")
-
-            full_title = f"{title} – {ch} | Materials: {materials or 'None'} | Probe: {pid or '–'} | Equipment: {eid or '–'}"
-            chart = (line + rules).properties(title=full_title)
-            st.altair_chart(chart,use_container_width=True)
+for name, df in dfs.items():
+    st.header(name)
+    ts_choice = None
+    if tempdfs:
+        ts_choice = st.selectbox(f"Match Tempstick for {name}", [None] + list(tempdfs.keys()), key=f"ts_{name}")
+    title = st.text_input(f"Chart Title", value=f"{name} - {calendar.month_name[month]} {year}", key=f"title_{name}")
+    materials = st.text_input("Materials List", key=f"materials_{name}")
+    probe_id = st.text_input("Probe ID", key=f"probe_{name}")
+    equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
+    channel_keys = list(ranges[name].keys())
+    channels = st.multiselect("Channels to plot", options=channel_keys, default=channel_keys, key=f"channels_{name}")
+    if not st.button(f"Generate {name}", key=f"btn_{name}"):
+        continue
+    sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
+    if sel.empty:
+        st.warning("No data for selected period.")
+        continue
+    ts_df = None
+    if ts_choice:
+        ts_df = tempdfs.get(ts_choice)
+        ts_df = ts_df[(ts_df['DateTime'].dt.year == year) & (ts_df['DateTime'].dt.month == month)]
+    start_date = datetime(year, month, 1)
+    end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
+    for ch in channels:
+        probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
+        probe_sub['Source'] = 'Probe'
+        df_chart = probe_sub.copy()
+        if ts_df is not None and ch in ts_df.columns:
+            ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
+            ts_sub['Source'] = 'Tempstick'
+            df_chart = pd.concat([probe_sub, ts_sub], ignore_index=True)
+        low, high = ranges[name].get(ch, (None, None))
+        data_min, data_max = df_chart['Value'].min(), df_chart['Value'].max()
+        span = ((high if high is not None else data_max) - (low if low is not None else data_min)) or 1
+        pad = span * 0.1
+        ymin = (low if low is not None else data_min) - pad
+        ymax = (high if high is not None else data_max) + pad
+        base = alt.Chart(df_chart).encode(
+            x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
+            y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax])),
+            color=alt.Color('Source:N')
+        )
+        line = base.mark_line()
+        if low is not None:
+            low_df = pd.DataFrame({'DateTime': [start_date, end_date], 'value': [low, low]})
+            low_line = alt.Chart(low_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
+            line += low_line
+        if high is not None:
+            high_df = pd.DataFrame({'DateTime': [start_date, end_date], 'value': [high, high]})
+            high_line = alt.Chart(high_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
+            line += high_line
+        chart = line
+        st.altair_chart(
+            chart.properties(
+                title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
+            ),
+            use_container_width=True
+        )
+    st.subheader("Out-of-Range Events")
+    sel['OOR'] = sel.apply(
+        lambda r: any(
+            (r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])
+        ),
+        axis=1
+    )
+    sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
+    events = []
+    for gid, grp in sel.groupby('Group'):
+        if not grp['OOR'].iloc[0]:
+            continue
+        start = grp['DateTime'].iloc[0]
+        last_idx = grp.index[-1]
+        if last_idx + 1 < len(sel) and not sel.loc[last_idx + 1, 'OOR']:
+            end = sel.loc[last_idx + 1, 'DateTime']
+        else:
+            end = grp['DateTime'].iloc[-1]
+        duration = max((end - start).total_seconds() / 60, 0)
+        events.append({'Start': start, 'End': end, 'Duration(min)': duration})
+    if events:
+        ev_df = pd.DataFrame(events)
+        total = ev_df['Duration(min)'].sum()
+        incident = total >= 60 or any(ev_df['Duration(min)'] > 60)
+        st.table(ev_df)
+        st.write(f"Total OOR minutes: {total:.1f} | Incident: {'YES' if incident else 'No'}")
