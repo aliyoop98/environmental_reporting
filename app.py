@@ -6,7 +6,6 @@ from pandas.tseries.offsets import MonthEnd
 
 # Page configuration
 st.set_page_config(page_title="Environmental Reporting", layout="wide")
-
 st.title("Environmental Monitoring Dashboard")
 
 # --- SIDEBAR: UPLOADS & CONTROLS ---
@@ -95,7 +94,6 @@ for f in probe_files or []:
     is_fridge = "fridge" in lower and "freezer" not in lower
     is_freezer = "freezer" in lower and "fridge" not in lower
     is_combo = "fridge" in lower and "freezer" in lower
-    is_olympus = "olympus" in lower
 
     if is_combo:
         df = df[[c for c in ["P1", "P2", "Date", "Time"] if c in df.columns]]
@@ -142,15 +140,15 @@ ranges = {}
 for name, df in parsed_probes.items():
     lower = name.lower()
     if "fridge" in lower and "freezer" not in lower:
-        ranges[name] = {"Temperature": (2, 8)}
+        ranges[name] = {"Temperature": (2.0, 8.0)}
     elif "freezer" in lower and "fridge" not in lower:
-        ranges[name] = {"Temperature": (-35, -5)}
+        ranges[name] = {"Temperature": (-35.0, -5.0)}
     elif "fridge" in lower and "freezer" in lower:
-        ranges[name] = {"Fridge Temp": (2, 8), "Freezer Temp": (-35, -5)}
+        ranges[name] = {"Fridge Temp": (2.0, 8.0), "Freezer Temp": (-35.0, -5.0)}
     elif "olympus" in lower:
-        ranges[name] = {"Temperature": (15, 28), "Humidity": (0, 60)}
+        ranges[name] = {"Temperature": (15.0, 28.0), "Humidity": (0.0, 60.0)}
     else:
-        ranges[name] = {"Temperature": (15, 25), "Humidity": (0, 60)}
+        ranges[name] = {"Temperature": (15.0, 25.0), "Humidity": (0.0, 60.0)}
 
 # --- MAIN: DISPLAY & PLOT ---
 for name, df in parsed_probes.items():
@@ -185,13 +183,17 @@ for name, df in parsed_probes.items():
             else:
                 df_chart = df_probe
 
-            # ===== NEW: force numeric and drop NaNs =====
+            # Force numeric conversion and drop non-numeric
             df_chart["Value"] = pd.to_numeric(df_chart["Value"], errors="coerce")
             df_chart = df_chart.dropna(subset=["Value"])
 
             low_val, high_val = ranges[name][ch]
-            dmin, dmax = df_chart["Value"].min(), df_chart["Value"].max()
-            domain_min, domain_max = min(dmin, low_val), max(dmax, high_val)
+            dmin = df_chart["Value"].min()
+            dmax = df_chart["Value"].max()
+            if pd.isna(dmin): dmin = low_val
+            if pd.isna(dmax): dmax = high_val
+            domain_min = min(float(dmin), float(low_val))
+            domain_max = max(float(dmax), float(high_val))
 
             base = alt.Chart(df_chart).encode(
                 x=alt.X(
