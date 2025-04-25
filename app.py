@@ -100,6 +100,67 @@ for name, df in dfs.items():
     probe_id = col2.text_input('Probe ID', key=f"{name}_probe")
     equipment_id = col2.text_input('Equipment ID', key=f"{name}_equip")
     ts_df = None
+
+    # --- TEMPSTICK UPLOAD & SELECTOR ---
+uploaded_ts = st.sidebar.file_uploader(
+    "Upload Tempstick CSV files (optional)",
+    type=["csv"],
+    accept_multiple_files=True,
+    key="tempstick_uploader"
+)
+
+# Parse each Tempstick file into a DataFrame
+tempdfs = {}
+for ts_file in uploaded_ts:
+    # strip metadata if needed, or read directly
+    df_ts = pd.read_csv(
+        ts_file,
+        on_bad_lines="skip",
+        skip_blank_lines=True
+    )
+    # find the header row that contains "Timestamp"
+    header_idx = max(
+        i for i, line in enumerate(ts_file.getvalue().decode().splitlines())
+        if "timestamp" in line.lower()
+    )
+    content = "\n".join(ts_file.getvalue().decode().splitlines()[header_idx:])
+    df_ts = pd.read_csv(io.StringIO(content), on_bad_lines="skip")
+
+    # normalize & filter columns
+    df_ts.columns = [c.strip() for c in df_ts.columns]
+    cols = {c: c for c in df_ts.columns}
+    # detect Timestamp, Temperature, Humidity
+    for c in df_ts.columns:
+        lc = c.lower()
+        if "timestamp" in lc:
+            cols[c] = "DateTime"
+        elif "temperature" in lc:
+            cols[c] = "Temperature"
+        elif "humidity" in lc:
+            cols[c] = "Humidity"
+    df_ts = df_ts.rename(columns=cols)
+    keep = ["DateTime", "Temperature", "Humidity"]
+    df_ts = df_ts[[c for c in keep if c in df_ts.columns]]
+    # parse DateTime and numeric
+    df_ts["DateTime"] = pd.to_datetime(df_ts["DateTime"], errors="coerce")
+    df_ts["Temperature"] = pd.to_numeric(df_ts["Temperature"], errors="coerce")
+    if "Humidity" in df_ts:
+        df_ts["Humidity"] = pd.to_numeric(df_ts["Humidity"], errors="coerce")
+
+    tempdfs[ts_file.name] = df_ts
+
+# Build the overlay selector only if we have parsed Tempsticks
+if tempdfs:
+    ts_choice = st.sidebar.selectbox(
+        "Select Tempstick to overlay",
+        options=list(tempdfs.keys()),
+        key="tempstick_choice"
+    )
+    ts_df = tempdfs[ts_choice]
+else:
+    ts_df = None
+
+    
     if tempdfs:
         ts_choice = col1.selectbox(
             'Tempstick to overlay',
