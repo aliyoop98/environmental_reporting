@@ -131,65 +131,70 @@ for name, df in dfs.items():
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
     for ch in channels:
+        # Combine Probe and Tempstick
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
         probe_sub['Source'] = 'Probe'
         df_chart = probe_sub.copy()
         if ts_df is not None and ch in ts_df.columns:
             ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
             ts_sub['Source'] = 'Tempstick'
-            df_chart = pd.concat([probe_sub, ts_sub], ignore_index=True)
-        df_chart = df_chart.dropna(subset=['Value'])  # ensure numeric values
+            df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
+        df_chart = df_chart.dropna(subset=['Value'])
 
-        # Dynamically fit y-axis to the actual data range
+        # Fit Y-axis to actual data with padding
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
-        span = (data_max - data_min) or 1
-        pad = span * 0.1
+        if data_max == data_min:
+            pad = data_min * 0.1 if data_min != 0 else 1
+        else:
+            pad = (data_max - data_min) * 0.1
         ymin = data_min - pad
         ymax = data_max + pad
 
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
-            y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax])),
+            y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
             color=alt.Color('Source:N')
         )
         line = base.mark_line()
         layers = [line]
-        if ranges[name].get(ch):
-            low, high = ranges[name][ch]
-            if low is not None:
-                low_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [low, low]})
+
+        # Add limit lines if defined
+        if ch in ranges[name]:
+            lo, hi = ranges[name][ch]
+            if lo is not None:
+                lo_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [lo, lo]})
                 layers.append(
-                    alt.Chart(low_df).mark_rule(color='red', strokeDash=[4,4]).encode(
+                    alt.Chart(lo_df).mark_rule(color='red', strokeDash=[4,4]).encode(
                         x='DateTime:T', y='Value:Q'
                     )
                 )
-            if high is not None:
-                high_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [high, high]})
+            if hi is not None:
+                hi_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [hi, hi]})
                 layers.append(
-                    alt.Chart(high_df).mark_rule(color='red', strokeDash=[4,4]).encode(
+                    alt.Chart(hi_df).mark_rule(color='red', strokeDash=[4,4]).encode(
                         x='DateTime:T', y='Value:Q'
                     )
                 )
+
         chart = alt.layer(*layers).properties(
             title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         )
         st.altair_chart(chart, use_container_width=True)
 
+    # Out-of-Range Events Table
     st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
-        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])),
-        axis=1
+        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])), axis=1
     )
     sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
     events = []
     for gid, grp in sel.groupby('Group'):
-        if not grp['OOR'].iloc[0]:
-            continue
+        if not grp['OOR'].iloc[0]: continue
         start = grp['DateTime'].iloc[0]
         last_idx = grp.index[-1]
-        if last_idx + 1 < len(sel) and not sel.loc[last_idx + 1, 'OOR']:
-            end = sel.loc[last_idx + 1, 'DateTime']
+        if last_idx + 1 < len(sel) and not sel.loc[last_idx+1,'OOR']:
+            end = sel.loc[last_idx+1,'DateTime']
         else:
             end = grp['DateTime'].iloc[-1]
         duration = max((end - start).total_seconds() / 60, 0)
