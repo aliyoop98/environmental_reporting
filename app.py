@@ -33,12 +33,10 @@ tempdfs = {}
 if ts_files:
     for ts in ts_files:
         raw = ts.getvalue().decode(errors="ignore").splitlines()
-        # Find last header row containing "timestamp"
         hdr = max(i for i, L in enumerate(raw) if "timestamp" in L.lower())
         content = "\n".join(raw[hdr:])
         df_ts = pd.read_csv(io.StringIO(content), on_bad_lines="skip", skip_blank_lines=True)
         df_ts.columns = [c.strip() for c in df_ts.columns]
-        # Normalize columns
         colmap = {}
         for c in df_ts.columns:
             lc = c.lower()
@@ -71,12 +69,10 @@ else:
 parsed_probes = {}
 for f in probe_files or []:
     raw = f.getvalue().decode(errors="ignore").splitlines()
-    # find last header row containing CH1 or P1
     hdr = max(i for i, L in enumerate(raw) if "ch1" in L.lower() or "p1" in L.lower())
     content = "\n".join(raw[hdr:])
     df = pd.read_csv(io.StringIO(content), on_bad_lines="skip", skip_blank_lines=True)
     df.columns = [c.strip() for c in df.columns]
-    # Build a map from raw to standard names
     colmap = {}
     for c in df.columns:
         lc = c.lower()
@@ -101,17 +97,13 @@ for f in probe_files or []:
     is_combo = "fridge" in lower and "freezer" in lower
     is_olympus = "olympus" in lower
 
-    # Filter & rename columns per type
     if is_combo:
-        # Combo: P1 → Fridge Temp, P2 → Freezer Temp
         df = df[[c for c in ["P1", "P2", "Date", "Time"] if c in df.columns]]
         df = df.rename(columns={"P1": "Fridge Temp", "P2": "Freezer Temp"})
     elif is_fridge or is_freezer:
-        # Single-channel: P1 → Temperature
         df = df[[c for c in ["P1", "Date", "Time"] if c in df.columns]]
         df = df.rename(columns={"P1": "Temperature"})
     else:
-        # Rooms (including Olympus)
         hum_col = "CH3" if "CH3" in df.columns else None
         temp_col = "CH4" if "CH4" in df.columns else None
         if not temp_col and "CH2" in df.columns:
@@ -120,7 +112,6 @@ for f in probe_files or []:
         df = df[keep]
         df = df.rename(columns={hum_col: "Humidity", temp_col: "Temperature"})
 
-    # Parse Date & DateTime
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["DateTime"] = pd.to_datetime(
         df["Date"].dt.strftime("%Y-%m-%d") + " " + df["Time"].astype(str),
@@ -128,7 +119,6 @@ for f in probe_files or []:
     )
     parsed_probes[name] = df
 
-# Ensure we have at least one probe
 if not parsed_probes:
     st.error("Please upload at least one probe CSV.")
     st.stop()
@@ -165,7 +155,6 @@ for name, df in parsed_probes.items():
 # --- MAIN: DISPLAY & PLOT ---
 for name, df in parsed_probes.items():
     with st.expander(name, expanded=True):
-        # Metadata inputs
         chart_title = st.text_input(
             "Chart Title",
             value=f"{name} {pd.Timestamp(year, month, 1).strftime('%B %Y')}",
@@ -175,22 +164,17 @@ for name, df in parsed_probes.items():
         probe_id = st.text_input("Probe ID", key=f"{name}_probe")
         equip_id = st.text_input("Equipment ID", key=f"{name}_equip")
 
-        # Filter to selected year/month
         sel = df[
             (df["DateTime"].dt.year == year) &
             (df["DateTime"].dt.month == month)
         ].copy().reset_index(drop=True)
 
-        # Channels to plot for this asset
         channels = list(ranges[name].keys())
 
-        # Plot each channel separately
         for ch in channels:
-            # Probe series
             df_probe = sel[["DateTime", ch]].rename(columns={ch: "Value"})
             df_probe["Source"] = "Probe"
 
-            # Tempstick overlay if available
             if ts_df is not None and ch in ts_df.columns:
                 df_ts_sel = ts_df[
                     (ts_df["DateTime"].dt.year == year) &
@@ -201,12 +185,14 @@ for name, df in parsed_probes.items():
             else:
                 df_chart = df_probe
 
-            # Compute Y-domain
+            # ===== NEW: force numeric and drop NaNs =====
+            df_chart["Value"] = pd.to_numeric(df_chart["Value"], errors="coerce")
+            df_chart = df_chart.dropna(subset=["Value"])
+
             low_val, high_val = ranges[name][ch]
             dmin, dmax = df_chart["Value"].min(), df_chart["Value"].max()
             domain_min, domain_max = min(dmin, low_val), max(dmax, high_val)
 
-            # Build base chart
             base = alt.Chart(df_chart).encode(
                 x=alt.X(
                     "DateTime:T",
@@ -223,17 +209,14 @@ for name, df in parsed_probes.items():
                 )
             )
 
-            # Line plot with legend
             line = base.mark_line().encode(
                 color=alt.Color("Source:N", title="Series")
             )
 
-            # Horizontal threshold rules
             rules = alt.Chart(pd.DataFrame({"y": [low_val, high_val]})).mark_rule(
                 strokeDash=[5, 5], color="red"
             ).encode(y="y:Q")
 
-            # Combine and render
             title_str = (
                 f"{chart_title} – {ch} | Materials: {materials or 'None'} "
                 f"| Probe: {probe_id or '–'} | Equipment: {equip_id or '–'}"
