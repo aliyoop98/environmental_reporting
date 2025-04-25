@@ -138,38 +138,47 @@ for name, df in dfs.items():
             ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
             ts_sub['Source'] = 'Tempstick'
             df_chart = pd.concat([probe_sub, ts_sub], ignore_index=True)
-        low, high = ranges[name].get(ch, (None, None))
-        data_min, data_max = df_chart['Value'].min(), df_chart['Value'].max()
-        span = ((high if high is not None else data_max) - (low if low is not None else data_min)) or 1
+        df_chart = df_chart.dropna(subset=['Value'])  # ensure numeric values
+
+        # Dynamically fit y-axis to the actual data range
+        data_min = df_chart['Value'].min()
+        data_max = df_chart['Value'].max()
+        span = (data_max - data_min) or 1
         pad = span * 0.1
-        ymin = (low if low is not None else data_min) - pad
-        ymax = (high if high is not None else data_max) + pad
+        ymin = data_min - pad
+        ymax = data_max + pad
+
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
             y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax])),
             color=alt.Color('Source:N')
         )
         line = base.mark_line()
-        if low is not None:
-            low_df = pd.DataFrame({'DateTime': [start_date, end_date], 'value': [low, low]})
-            low_line = alt.Chart(low_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
-            line += low_line
-        if high is not None:
-            high_df = pd.DataFrame({'DateTime': [start_date, end_date], 'value': [high, high]})
-            high_line = alt.Chart(high_df).mark_rule(color='red', strokeDash=[4,4]).encode(y='value:Q')
-            line += high_line
-        chart = line
-        st.altair_chart(
-            chart.properties(
-                title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
-            ),
-            use_container_width=True
+        layers = [line]
+        if ranges[name].get(ch):
+            low, high = ranges[name][ch]
+            if low is not None:
+                low_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [low, low]})
+                layers.append(
+                    alt.Chart(low_df).mark_rule(color='red', strokeDash=[4,4]).encode(
+                        x='DateTime:T', y='Value:Q'
+                    )
+                )
+            if high is not None:
+                high_df = pd.DataFrame({'DateTime': [start_date, end_date], 'Value': [high, high]})
+                layers.append(
+                    alt.Chart(high_df).mark_rule(color='red', strokeDash=[4,4]).encode(
+                        x='DateTime:T', y='Value:Q'
+                    )
+                )
+        chart = alt.layer(*layers).properties(
+            title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         )
+        st.altair_chart(chart, use_container_width=True)
+
     st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
-        lambda r: any(
-            (r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])
-        ),
+        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])),
         axis=1
     )
     sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
