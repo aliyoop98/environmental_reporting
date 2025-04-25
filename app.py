@@ -4,6 +4,7 @@ import altair as alt
 import io
 from pandas.tseries.offsets import MonthEnd
 
+# Page configuration
 st.set_page_config(page_title="Environmental Reporting", layout="wide")
 
 st.title("Environmental Monitoring Dashboard")
@@ -57,7 +58,11 @@ if ts_files:
         tempdfs[ts.name] = df_ts
 
 if tempdfs:
-    ts_choice = st.sidebar.selectbox("Select Tempstick to overlay", list(tempdfs.keys()), key="ts_choice")
+    ts_choice = st.sidebar.selectbox(
+        "Select Tempstick to overlay",
+        options=list(tempdfs.keys()),
+        key="ts_choice"
+    )
     ts_df = tempdfs[ts_choice]
 else:
     ts_df = None
@@ -75,9 +80,9 @@ for f in probe_files or []:
     colmap = {}
     for c in df.columns:
         lc = c.lower()
-        if "date" == lc or "date" in lc:
+        if "date" in lc:
             colmap[c] = "Date"
-        elif "time" == lc or "time" in lc:
+        elif "time" in lc:
             colmap[c] = "Time"
         elif "p1" in lc:
             colmap[c] = "P1"
@@ -88,41 +93,42 @@ for f in probe_files or []:
         elif "ch4" in lc:
             colmap[c] = "CH4"
     df = df.rename(columns=colmap)
-    # Determine asset type by filename
+
     name = f.name
     lower = name.lower()
     is_fridge = "fridge" in lower and "freezer" not in lower
     is_freezer = "freezer" in lower and "fridge" not in lower
     is_combo = "fridge" in lower and "freezer" in lower
     is_olympus = "olympus" in lower
-    is_room = not (is_fridge or is_freezer or is_combo) or is_olympus
 
     # Filter & rename columns per type
     if is_combo:
-        need = ["P1", "P2", "Date", "Time"]
-        df = df[[c for c in need if c in df.columns]]
+        # Combo: P1 → Fridge Temp, P2 → Freezer Temp
+        df = df[[c for c in ["P1", "P2", "Date", "Time"] if c in df.columns]]
         df = df.rename(columns={"P1": "Fridge Temp", "P2": "Freezer Temp"})
     elif is_fridge or is_freezer:
-        need = ["P1", "Date", "Time"]
-        df = df[[c for c in need if c in df.columns]]
+        # Single-channel: P1 → Temperature
+        df = df[[c for c in ["P1", "Date", "Time"] if c in df.columns]]
         df = df.rename(columns={"P1": "Temperature"})
-    else:  # rooms & olympus
-        # humidity from CH3, temperature from CH4 or fallback CH1/CH2
+    else:
+        # Rooms (including Olympus)
         hum_col = "CH3" if "CH3" in df.columns else None
         temp_col = "CH4" if "CH4" in df.columns else None
         if not temp_col and "CH2" in df.columns:
             temp_col = "CH2"
-        need = [c for c in [hum_col, temp_col, "Date", "Time"] if c]
-        df = df[need]
+        keep = [c for c in [hum_col, temp_col, "Date", "Time"] if c]
+        df = df[keep]
         df = df.rename(columns={hum_col: "Humidity", temp_col: "Temperature"})
 
     # Parse Date & DateTime
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["DateTime"] = pd.to_datetime(df["Date"].dt.strftime("%Y-%m-%d") + " " + df["Time"].astype(str),
-                                     errors="coerce")
+    df["DateTime"] = pd.to_datetime(
+        df["Date"].dt.strftime("%Y-%m-%d") + " " + df["Time"].astype(str),
+        errors="coerce"
+    )
     parsed_probes[name] = df
 
-# Stop if no probes
+# Ensure we have at least one probe
 if not parsed_probes:
     st.error("Please upload at least one probe CSV.")
     st.stop()
@@ -130,9 +136,16 @@ if not parsed_probes:
 # --- YEAR & MONTH SELECTION ---
 all_dates = pd.concat([df["DateTime"] for df in parsed_probes.values()])
 years = sorted(all_dates.dt.year.dropna().unique().astype(int).tolist())
-year = st.sidebar.selectbox("Year", years, index=len(years)-1)
+default_year_idx = len(years) - 1
+year = st.sidebar.selectbox("Year", years, index=default_year_idx)
+
 months = list(range(1, 13))
-month = st.sidebar.selectbox("Month", months, index=year == years[-1] and all_dates.dt.month.max()-1)
+if year == years[-1]:
+    last_month = int(all_dates.dt.month.max())
+    default_month_idx = months.index(last_month)
+else:
+    default_month_idx = 0
+month = st.sidebar.selectbox("Month", months, index=default_month_idx)
 
 # Default ranges per asset type
 ranges = {}
@@ -153,62 +166,77 @@ for name, df in parsed_probes.items():
 for name, df in parsed_probes.items():
     with st.expander(name, expanded=True):
         # Metadata inputs
-        chart_title = st.text_input("Chart Title", value=f"{name} {pd.Timestamp(year, month, 1).strftime('%B %Y')}",
-                                    key=f"{name}_title")
+        chart_title = st.text_input(
+            "Chart Title",
+            value=f"{name} {pd.Timestamp(year, month, 1).strftime('%B %Y')}",
+            key=f"{name}_title"
+        )
         materials = st.text_area("Materials", key=f"{name}_materials")
         probe_id = st.text_input("Probe ID", key=f"{name}_probe")
         equip_id = st.text_input("Equipment ID", key=f"{name}_equip")
 
-        # Filter to selection
+        # Filter to selected year/month
         sel = df[
             (df["DateTime"].dt.year == year) &
             (df["DateTime"].dt.month == month)
         ].copy().reset_index(drop=True)
 
-        # Determine channels to plot
+        # Channels to plot for this asset
         channels = list(ranges[name].keys())
 
-        # Plot each channel
+        # Plot each channel separately
         for ch in channels:
-            # Build probe series
-            df_probe = sel[["DateTime", ch]].rename(columns={ch: "Value"}).assign(Source="Probe")
-            # Overlay Tempstick if available
+            # Probe series
+            df_probe = sel[["DateTime", ch]].rename(columns={ch: "Value"})
+            df_probe["Source"] = "Probe"
+
+            # Tempstick overlay if available
             if ts_df is not None and ch in ts_df.columns:
                 df_ts_sel = ts_df[
                     (ts_df["DateTime"].dt.year == year) &
                     (ts_df["DateTime"].dt.month == month)
-                ][["DateTime", ch]].rename(columns={ch: "Value"}).assign(Source="Tempstick")
+                ][["DateTime", ch]].rename(columns={ch: "Value"})
+                df_ts_sel["Source"] = "Tempstick"
                 df_chart = pd.concat([df_probe, df_ts_sel], ignore_index=True)
             else:
                 df_chart = df_probe
 
-            # Compute Y domain
+            # Compute Y-domain
             low_val, high_val = ranges[name][ch]
             dmin, dmax = df_chart["Value"].min(), df_chart["Value"].max()
             domain_min, domain_max = min(dmin, low_val), max(dmax, high_val)
 
             # Build base chart
             base = alt.Chart(df_chart).encode(
-                x=alt.X("DateTime:T", title="Date/Time",
-                        scale=alt.Scale(domain=[
-                            pd.Timestamp(year, month, 1),
-                            pd.Timestamp(year, month, 1) + MonthEnd(0)
-                        ])),
-                y=alt.Y("Value:Q", title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})",
-                        scale=alt.Scale(domain=[domain_min, domain_max]))
+                x=alt.X(
+                    "DateTime:T",
+                    title="Date/Time",
+                    scale=alt.Scale(domain=[
+                        pd.Timestamp(year, month, 1),
+                        pd.Timestamp(year, month, 1) + MonthEnd(0)
+                    ])
+                ),
+                y=alt.Y(
+                    "Value:Q",
+                    title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})",
+                    scale=alt.Scale(domain=[domain_min, domain_max])
+                )
             )
 
-            # Lines & legend
-            line = base.mark_line().encode(color=alt.Color("Source:N", title="Series"))
+            # Line plot with legend
+            line = base.mark_line().encode(
+                color=alt.Color("Source:N", title="Series")
+            )
 
-            # Threshold rules
+            # Horizontal threshold rules
             rules = alt.Chart(pd.DataFrame({"y": [low_val, high_val]})).mark_rule(
                 strokeDash=[5, 5], color="red"
             ).encode(y="y:Q")
 
-            # Final
-            chart = (line + rules).properties(
-                title=f"{chart_title} – {ch} | Materials: {materials or 'None'} "
-                      f"| Probe: {probe_id or '–'} | Equipment: {equip_id or '–'}"
+            # Combine and render
+            title_str = (
+                f"{chart_title} – {ch} | Materials: {materials or 'None'} "
+                f"| Probe: {probe_id or '–'} | Equipment: {equip_id or '–'}"
             )
+            chart = (line + rules).properties(title=title_str)
             st.altair_chart(chart, use_container_width=True)
