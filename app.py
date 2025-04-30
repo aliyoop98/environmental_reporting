@@ -7,11 +7,10 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="📈")
 
-# Sidebar configuration
 st.sidebar.header("Data Upload & Configuration")
 probe_files = st.sidebar.file_uploader(
     "Upload Probe CSV files",
-    accept_multiple_files=True,  # removed `type=[...]` restriction
+    accept_multiple_files=True,
     key="probe_uploader"
 )
 if not probe_files:
@@ -20,7 +19,7 @@ if not probe_files:
 
 tempstick_files = st.sidebar.file_uploader(
     "Upload Tempstick CSV files (optional)",
-    accept_multiple_files=True,  # removed `type=[...]` restriction
+    accept_multiple_files=True,
     key="tempstick_uploads"
 )
 
@@ -105,34 +104,33 @@ for f in probe_files:
 years = sorted({dt.year for df in dfs.values() for dt in df['Date'].dropna()})
 months = sorted({dt.month for df in dfs.values() for dt in df['Date'].dropna()})
 year = st.sidebar.selectbox("Year", years)
-month = st.sidebar.selectbox(
-    "Month", months,
-    format_func=lambda m: calendar.month_name[m]
-)
+month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
 
 for name, df in dfs.items():
     st.header(name)
-    ts_choice = None
-    if tempdfs:
-        ts_choice = st.selectbox(f"Match Tempstick for {name}", [None] + list(tempdfs.keys()), key=f"ts_{name}")
+    ts_choice = st.selectbox(f"Match Tempstick for {name}", [None] + list(tempdfs.keys()), key=f"ts_{name}") if tempdfs else None
     title = st.text_input(f"Chart Title", value=f"{name} - {calendar.month_name[month]} {year}", key=f"title_{name}")
     materials = st.text_input("Materials List", key=f"materials_{name}")
     probe_id = st.text_input("Probe ID", key=f"probe_{name}")
     equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
     channel_keys = list(ranges[name].keys())
     channels = st.multiselect("Channels to plot", options=channel_keys, default=channel_keys, key=f"channels_{name}")
+
     if not st.button(f"Generate {name}", key=f"btn_{name}"):
         continue
+
     sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
     if sel.empty:
         st.warning("No data for selected period.")
         continue
-    ts_df = None
-    if ts_choice:
-        ts_df = tempdfs.get(ts_choice)
+
+    ts_df = tempdfs.get(ts_choice) if ts_choice else None
+    if ts_df is not None:
         ts_df = ts_df[(ts_df['DateTime'].dt.year == year) & (ts_df['DateTime'].dt.month == month)]
+
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
+
     for ch in channels:
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
         probe_sub['Source'] = 'Probe'
@@ -144,57 +142,34 @@ for name, df in dfs.items():
         df_chart = df_chart.dropna(subset=['Value'])
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
-        if ch in ranges[name]:
-            lo, hi = ranges[name][ch]
-        else:
-            lo, hi = data_min, data_max
-        raw_min = min(data_min, lo)
-        raw_max = max(data_max, hi)
+        lo, hi = ranges[name].get(ch, (data_min, data_max))
+        raw_min, raw_max = min(data_min, lo), max(data_max, hi)
         span = (raw_max - raw_min) or 1
         pad = span * 0.1
-        ymin = raw_min - pad
-        ymax = raw_max + pad
+        ymin, ymax = raw_min - pad, raw_max + pad
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
-            y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
+            y=alt.Y('Value:Q', title=f"{ch} ({'\u00b0C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
             color=alt.Color('Source:N')
         )
         line = base.mark_line()
         layers = [line]
         if ch in ranges[name]:
             lo, hi = ranges[name][ch]
-            if lo is not None:
-                layers.append(
-                    alt.Chart(pd.DataFrame({'y': [lo]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
-                )
-            if hi is not None:
-                layers.append(
-                    alt.Chart(pd.DataFrame({'y': [hi]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
-                )
-# build the two lines for the title
-title_lines = [
-    f"{title} - {ch}",
-    f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
-]
+            layers += [alt.Chart(pd.DataFrame({'y': [lo]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q'),
+                       alt.Chart(pd.DataFrame({'y': [hi]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')]
+        title_lines = [
+            f"{title} - {ch}",
+            f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
+        ]
+        chart = alt.layer(*layers).properties(
+            title={"text": title_lines, "anchor": "start"}
+        ).configure_title(fontSize=14, lineHeight=20, offset=10)
+        st.altair_chart(chart, use_container_width=True)
 
-# create the layered chart and set a multi‐line title
-chart = alt.layer(*layers).properties(
-    title={
-        "text": title_lines,
-        "anchor": "start"      # left‐align both lines
-    }
-).configure_title(
-    fontSize=14,             # adjust as needed
-    lineHeight=20,           # space between title lines
-    offset=10                # push the plot down so the title isn’t clipped
-)
-
-st.altair_chart(chart, use_container_width=True)
-
-st.subheader("Out-of-Range Events")
+    st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
-        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])),
-        axis=1
+        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])), axis=1
     )
     sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
     events = []
@@ -203,10 +178,7 @@ st.subheader("Out-of-Range Events")
             continue
         start = grp['DateTime'].iloc[0]
         last_idx = grp.index[-1]
-        if last_idx + 1 < len(sel) and not sel.loc[last_idx+1, 'OOR']:
-            end = sel.loc[last_idx+1, 'DateTime']
-        else:
-            end = grp['DateTime'].iloc[-1]
+        end = sel.loc[last_idx+1, 'DateTime'] if last_idx + 1 < len(sel) and not sel.loc[last_idx+1, 'OOR'] else grp['DateTime'].iloc[-1]
         duration = max((end - start).total_seconds() / 60, 0)
         events.append({'Start': start, 'End': end, 'Duration(min)': duration})
     if events:
