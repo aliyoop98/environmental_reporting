@@ -18,7 +18,7 @@ if not probe_files:
 
 tempstick_files = st.sidebar.file_uploader(
     "Upload Tempstick CSV files (optional)",
-    type=["csv"], accept_multiple_files=True, key="tempstick_uploads"
+    type=[".csv"], accept_multiple_files=True, key="tempstick_uploads"
 )
 
 # Parse Tempstick CSVs
