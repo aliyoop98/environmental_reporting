@@ -189,7 +189,7 @@ chart = alt.layer(*layers).properties(
     offset=10                # push the plot down so the title isn’t clipped
 )
 
-st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
 
     st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
