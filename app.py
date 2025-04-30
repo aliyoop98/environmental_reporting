@@ -171,10 +171,26 @@ for name, df in dfs.items():
                 layers.append(
                     alt.Chart(pd.DataFrame({'y': [hi]})).mark_rule(color='red', strokeDash=[4,4]).encode(y='y:Q')
                 )
-        chart = alt.layer(*layers).properties(
-            title=f"{title} - {ch} | Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
-        )
-        st.altair_chart(chart, use_container_width=True)
+# build the two lines for the title
+title_lines = [
+    f"{title} - {ch}",
+    f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
+]
+
+# create the layered chart and set a multi‐line title
+chart = alt.layer(*layers).properties(
+    title={
+        "text": title_lines,
+        "anchor": "start"      # left‐align both lines
+    }
+).configure_title(
+    fontSize=14,             # adjust as needed
+    lineHeight=20,           # space between title lines
+    offset=10                # push the plot down so the title isn’t clipped
+)
+
+st.altair_chart(chart, use_container_width=True)
+
     st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
         lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])),
