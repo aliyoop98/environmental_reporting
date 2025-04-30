@@ -10,7 +10,7 @@ st.set_page_config(page_title="Environmental Reporting", layout="wide", page_ico
 # Sidebar configuration
 st.sidebar.header("Data Upload & Configuration")
 probe_files = st.sidebar.file_uploader(
-    "Upload Probe CSV files", type=[".csv"], accept_multiple_files=True
+    "Upload Probe CSV files", type=["csv", "CSV"], accept_multiple_files=True
 )
 if not probe_files:
     st.sidebar.info("Upload Probe CSV files to begin.")
@@ -18,7 +18,7 @@ if not probe_files:
 
 tempstick_files = st.sidebar.file_uploader(
     "Upload Tempstick CSV files (optional)",
-    type=[".csv"], accept_multiple_files=True, key="tempstick_uploads"
+    type=["csv", "CSV"], accept_multiple_files=True, key="tempstick_uploads"
 )
 
 # Parse Tempstick CSVs
