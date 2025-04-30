@@ -10,7 +10,9 @@ st.set_page_config(page_title="Environmental Reporting", layout="wide", page_ico
 # Sidebar configuration
 st.sidebar.header("Data Upload & Configuration")
 probe_files = st.sidebar.file_uploader(
-    "Upload Probe CSV files", type=["csv", "CSV"], accept_multiple_files=True
+    "Upload Probe CSV files",
+    accept_multiple_files=True,  # removed `type=[...]` restriction
+    key="probe_uploader"
 )
 if not probe_files:
     st.sidebar.info("Upload Probe CSV files to begin.")
@@ -18,7 +20,8 @@ if not probe_files:
 
 tempstick_files = st.sidebar.file_uploader(
     "Upload Tempstick CSV files (optional)",
-    type=["csv", "CSV"], accept_multiple_files=True, key="tempstick_uploads"
+    accept_multiple_files=True,  # removed `type=[...]` restriction
+    key="tempstick_uploads"
 )
 
 # Parse Tempstick CSVs
@@ -139,7 +142,6 @@ for name, df in dfs.items():
             ts_sub['Source'] = 'Tempstick'
             df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
         df_chart = df_chart.dropna(subset=['Value'])
-        # Determine axis bounds: include full acceptable range or data range
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
         if ch in ranges[name]:
@@ -159,7 +161,6 @@ for name, df in dfs.items():
         )
         line = base.mark_line()
         layers = [line]
-        # Add horizontal limit lines
         if ch in ranges[name]:
             lo, hi = ranges[name][ch]
             if lo is not None:
@@ -176,16 +177,18 @@ for name, df in dfs.items():
         st.altair_chart(chart, use_container_width=True)
     st.subheader("Out-of-Range Events")
     sel['OOR'] = sel.apply(
-        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])), axis=1
+        lambda r: any((r[c] < lo or r[c] > hi) for c, (lo, hi) in ranges[name].items() if pd.notna(r[c])),
+        axis=1
     )
     sel['Group'] = (sel['OOR'] != sel['OOR'].shift(fill_value=False)).cumsum()
     events = []
     for gid, grp in sel.groupby('Group'):
-        if not grp['OOR'].iloc[0]: continue
+        if not grp['OOR'].iloc[0]:
+            continue
         start = grp['DateTime'].iloc[0]
         last_idx = grp.index[-1]
-        if last_idx + 1 < len(sel) and not sel.loc[last_idx+1,'OOR']:
-            end = sel.loc[last_idx+1,'DateTime']
+        if last_idx + 1 < len(sel) and not sel.loc[last_idx+1, 'OOR']:
+            end = sel.loc[last_idx+1, 'DateTime']
         else:
             end = grp['DateTime'].iloc[-1]
         duration = max((end - start).total_seconds() / 60, 0)
