@@ -1,4 +1,9 @@
 import streamlit as st
+import pandas as pd
+
+# Ensure 'channels', 'ranges', 'sel', and 'name' are defined in the parent scope.
+# For example:
+# channels = list(ranges[name].keys())
 
 st.subheader("Out-of-Range Events")
 col_objs = st.columns(len(channels))
