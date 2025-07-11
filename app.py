@@ -1,5 +1,3 @@
-# Replace the original OOR block starting at `st.subheader("Out-of-Range Events")` with this:
-
 st.subheader("Out-of-Range Events")
 col_objs = st.columns(len(channels))
 
