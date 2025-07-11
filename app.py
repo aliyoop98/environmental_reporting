@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
 
-# Ensure 'channels', 'ranges', 'sel', and 'name' are defined in the parent scope.
-# For example:
-# channels = list(ranges[name].keys())
+# Ensure 'ranges', 'sel', and 'name' are defined in the parent scope.
+channels = list(ranges[name].keys()) if name in ranges else []
 
 st.subheader("Out-of-Range Events")
-col_objs = st.columns(len(channels))
+col_objs = st.columns(len(channels)) if channels else [st]
 
 for i, ch in enumerate(channels):
     ch_lo, ch_hi = ranges[name].get(ch, (None, None))
