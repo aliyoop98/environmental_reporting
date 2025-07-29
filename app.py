@@ -5,9 +5,18 @@ import calendar
 import altair as alt
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="⛅")
+st.markdown(
+    """
+    <style>
+        .stApp { background: linear-gradient(#e3f2fd, #bbdefb); }
+        [data-testid="stSidebar"] { background: linear-gradient(#b3e5fc, #e1f5fe); }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-st.sidebar.header("Data Upload & Configuration")
+st.sidebar.header("🌦️ Data Upload & Configuration")
 probe_files = st.sidebar.file_uploader(
     "Upload Probe CSV files",
     accept_multiple_files=True,
