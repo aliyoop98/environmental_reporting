@@ -133,11 +133,11 @@ for name, df in dfs.items():
 
     for ch in channels:
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
-        probe_sub['Source'] = 'Probe'
+        probe_sub['Legend'] = 'Probe'
         df_chart = probe_sub.copy()
         if ts_df is not None and ch in ts_df.columns:
             ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
-            ts_sub['Source'] = 'Tempstick'
+            ts_sub['Legend'] = 'Tempstick'
             df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
         df_chart = df_chart.dropna(subset=['Value'])
         data_min = df_chart['Value'].min()
@@ -149,15 +149,19 @@ for name, df in dfs.items():
         ymin, ymax = raw_min - pad, raw_max + pad
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
-            y=alt.Y('Value:Q', title=f"{ch} ({'\u00b0C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
-            color=alt.Color('Source:N')
+            y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
+            color=alt.Color('Legend:N')
         )
         line = base.mark_line()
         layers = [line]
         if ch in ranges[name]:
             lo, hi = ranges[name][ch]
-            layers += [alt.Chart(pd.DataFrame({'y': [lo]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q'),
-                       alt.Chart(pd.DataFrame({'y': [hi]})).mark_rule(color='red', strokeDash=[4, 4]).encode(y='y:Q')]
+            limits_df = pd.DataFrame({'y': [lo, hi], 'Legend': ['Lower Limit', 'Upper Limit']})
+            layers.append(
+                alt.Chart(limits_df)
+                .mark_rule(strokeDash=[4, 4])
+                .encode(y='y:Q', color=alt.Color('Legend:N'))
+            )
         title_lines = [
             f"{title} - {ch}",
             f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
