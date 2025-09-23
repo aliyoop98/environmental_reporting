@@ -1,9 +1,27 @@
+from typing import Optional
+
 import streamlit as st
 import pandas as pd
 import io
 import calendar
 import altair as alt
 from datetime import datetime, timedelta
+
+
+def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
+    """Read CSV content supporting multiple delimiters.
+
+    Tries automatic delimiter detection first (e.g., tab separated files) and
+    falls back to the default comma behaviour if necessary.
+    """
+
+    for kwargs in ({"sep": None, "engine": "python"}, {}):
+        try:
+            df = pd.read_csv(io.StringIO(text), on_bad_lines="skip", **kwargs)
+        except Exception:
+            continue
+        return df.rename(columns=lambda c: c.strip() if isinstance(c, str) else c)
+    return None
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="⛅")
 st.markdown(
@@ -42,7 +60,9 @@ if tempstick_files:
         except ValueError:
             continue
         csv_text = ''.join(raw[idx:])
-        df_ts = pd.read_csv(io.StringIO(csv_text), on_bad_lines='skip').rename(columns=str.strip)
+        df_ts = _read_csv_flexible(csv_text)
+        if df_ts is None:
+            continue
         ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
         if not ts_col:
             continue
@@ -72,9 +92,11 @@ for f in probe_files:
     except ValueError:
         continue
     content = ''.join(raw[idx:])
-    df = pd.read_csv(io.StringIO(content), on_bad_lines='skip').rename(columns=str.strip)
+    df = _read_csv_flexible(content)
+    if df is None:
+        continue
     lname = name.lower()
-    has_fridge = 'fridge' in lname
+    has_fridge = any(term in lname for term in ('fridge', 'refrigerator'))
     has_freezer = 'freezer' in lname
     if has_fridge and has_freezer:
         mapping = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
