@@ -81,6 +81,19 @@ if tempstick_files:
             cols.append('Humidity')
         tempdfs[f.name] = df_ts[cols]
 
+
+def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]:
+    """Return the column in a tempstick dataframe that matches a probe channel."""
+
+    if channel in ts_df.columns:
+        return channel
+    ch_lower = channel.lower()
+    if 'temp' in ch_lower and 'Temperature' in ts_df.columns:
+        return 'Temperature'
+    if 'hum' in ch_lower and 'Humidity' in ts_df.columns:
+        return 'Humidity'
+    return None
+
 # Parse Probe CSVs
 dfs = {}
 ranges = {}
@@ -157,7 +170,7 @@ for name, df in dfs.items():
 
     ts_df = tempdfs.get(ts_choice) if ts_choice else None
     if ts_df is not None:
-        ts_df = ts_df[(ts_df['DateTime'].dt.year == year) & (ts_df['DateTime'].dt.month == month)]
+        ts_df = ts_df[(ts_df['DateTime'].dt.year == year) & (ts_df['DateTime'].dt.month == month)].copy()
 
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
@@ -166,8 +179,9 @@ for name, df in dfs.items():
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
         probe_sub['Legend'] = 'Probe'
         df_chart = probe_sub.copy()
-        if ts_df is not None and ch in ts_df.columns:
-            ts_sub = ts_df[['DateTime', ch]].rename(columns={ch: 'Value'})
+        ts_column = _match_tempstick_channel(ts_df, ch) if ts_df is not None else None
+        if ts_df is not None and ts_column:
+            ts_sub = ts_df[['DateTime', ts_column]].rename(columns={ts_column: 'Value'})
             ts_sub['Legend'] = 'Tempstick'
             df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
         df_chart = df_chart.dropna(subset=['Value'])
@@ -178,20 +192,34 @@ for name, df in dfs.items():
         span = (raw_max - raw_min) or 1
         pad = span * 0.1
         ymin, ymax = raw_min - pad, raw_max + pad
+        color_map = {
+            'Probe': '#1f77b4',
+            'Tempstick': '#ff7f0e',
+            'Lower Limit': '#2ca02c',
+            'Upper Limit': '#d62728',
+        }
+        legend_entries = ['Probe']
+        if ts_df is not None and ts_column:
+            legend_entries.append('Tempstick')
+        has_limits = ch in ranges[name]
+        if has_limits:
+            legend_entries.extend(['Lower Limit', 'Upper Limit'])
+        color_domain = [entry for entry in color_map if entry in legend_entries]
+        color_scale = alt.Scale(domain=color_domain, range=[color_map[e] for e in color_domain])
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
             y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
-            color=alt.Color('Legend:N')
+            color=alt.Color('Legend:N', scale=color_scale, legend=alt.Legend(title='Series'))
         )
         line = base.mark_line()
         layers = [line]
-        if ch in ranges[name]:
+        if has_limits:
             lo, hi = ranges[name][ch]
             limits_df = pd.DataFrame({'y': [lo, hi], 'Legend': ['Lower Limit', 'Upper Limit']})
             layers.append(
                 alt.Chart(limits_df)
                 .mark_rule(strokeDash=[4, 4])
-                .encode(y='y:Q', color=alt.Color('Legend:N'))
+                .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
             )
         title_lines = [
             f"{title} - {ch}",
