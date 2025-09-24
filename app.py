@@ -265,7 +265,11 @@ for name, df in dfs.items():
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
             y=alt.Y('Value:Q', title=f"{ch} ({'°C' if 'Temp' in ch else '%RH'})", scale=alt.Scale(domain=[ymin, ymax], nice=False)),
-            color=alt.Color('Legend:N', scale=color_scale, legend=alt.Legend(title='Series'))
+            color=alt.Color(
+                'Legend:N',
+                scale=color_scale,
+                legend=alt.Legend(title='Series', labelLimit=0)
+            )
         )
         line = base.mark_line()
         layers = [line]
