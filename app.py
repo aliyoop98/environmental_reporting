@@ -152,13 +152,36 @@ month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.mon
 
 for name, df in dfs.items():
     st.header(name)
-    ts_choice = st.selectbox(f"Match Tempstick for {name}", [None] + list(tempdfs.keys()), key=f"ts_{name}") if tempdfs else None
-    title = st.text_input(f"Chart Title", value=f"{name} - {calendar.month_name[month]} {year}", key=f"title_{name}")
+    selected_tempsticks = (
+        st.multiselect(
+            f"Match Tempsticks for {name}",
+            options=list(tempdfs.keys()),
+            key=f"ts_{name}"
+        )
+        if tempdfs
+        else []
+    )
+    comparison_options = [p for p in dfs.keys() if p != name]
+    comparison_probes = st.multiselect(
+        "Additional probe files to overlay",
+        options=comparison_options,
+        key=f"compare_{name}"
+    )
+    title = st.text_input(
+        "Chart Title",
+        value=f"{name} - {calendar.month_name[month]} {year}",
+        key=f"title_{name}"
+    )
     materials = st.text_input("Materials List", key=f"materials_{name}")
     probe_id = st.text_input("Probe ID", key=f"probe_{name}")
     equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
     channel_keys = list(ranges[name].keys())
-    channels = st.multiselect("Channels to plot", options=channel_keys, default=channel_keys, key=f"channels_{name}")
+    channels = st.multiselect(
+        "Channels to plot",
+        options=channel_keys,
+        default=channel_keys,
+        key=f"channels_{name}"
+    )
 
     if not st.button(f"Generate {name}", key=f"btn_{name}"):
         continue
@@ -168,23 +191,56 @@ for name, df in dfs.items():
         st.warning("No data for selected period.")
         continue
 
-    ts_df = tempdfs.get(ts_choice) if ts_choice else None
-    if ts_df is not None:
-        ts_df = ts_df[(ts_df['DateTime'].dt.year == year) & (ts_df['DateTime'].dt.month == month)].copy()
-
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
 
     for ch in channels:
+        series_frames = []
+        probe_legends = []
+        tempstick_legends = []
+
+        probe_label = f"Probe ({name})"
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
-        probe_sub['Legend'] = 'Probe'
-        df_chart = probe_sub.copy()
-        ts_column = _match_tempstick_channel(ts_df, ch) if ts_df is not None else None
-        if ts_df is not None and ts_column:
-            ts_sub = ts_df[['DateTime', ts_column]].rename(columns={ts_column: 'Value'})
-            ts_sub['Legend'] = 'Tempstick'
-            df_chart = pd.concat([df_chart, ts_sub], ignore_index=True)
-        df_chart = df_chart.dropna(subset=['Value'])
+        probe_sub['Legend'] = probe_label
+        series_frames.append(probe_sub)
+        probe_legends.append(probe_label)
+
+        for comp_name in comparison_probes:
+            comp_df = dfs[comp_name]
+            comp_sel = comp_df[
+                (comp_df['Date'].dt.year == year)
+                & (comp_df['Date'].dt.month == month)
+            ].sort_values('DateTime').reset_index(drop=True)
+            if ch not in comp_sel.columns:
+                continue
+            comp_label = f"Probe ({comp_name})"
+            comp_sub = comp_sel[['DateTime', ch]].rename(columns={ch: 'Value'})
+            comp_sub['Legend'] = comp_label
+            series_frames.append(comp_sub)
+            probe_legends.append(comp_label)
+
+        for ts_name in selected_tempsticks:
+            ts_df = tempdfs.get(ts_name)
+            if ts_df is None:
+                continue
+            ts_filtered = ts_df[
+                (ts_df['DateTime'].dt.year == year)
+                & (ts_df['DateTime'].dt.month == month)
+            ].copy()
+            ts_column = _match_tempstick_channel(ts_filtered, ch)
+            if not ts_column:
+                continue
+            ts_label = f"Tempstick ({ts_name})"
+            ts_sub = ts_filtered[['DateTime', ts_column]].rename(columns={ts_column: 'Value'})
+            ts_sub['Legend'] = ts_label
+            series_frames.append(ts_sub)
+            tempstick_legends.append(ts_label)
+
+        if not series_frames:
+            st.warning(f"No data available to chart for channel {ch}.")
+            continue
+
+        df_chart = pd.concat(series_frames, ignore_index=True).dropna(subset=['Value'])
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
         lo, hi = ranges[name].get(ch, (data_min, data_max))
@@ -192,15 +248,15 @@ for name, df in dfs.items():
         span = (raw_max - raw_min) or 1
         pad = span * 0.1
         ymin, ymax = raw_min - pad, raw_max + pad
-        color_map = {
-            'Probe': '#1f77b4',
-            'Tempstick': '#ff7f0e',
-            'Lower Limit': '#2ca02c',
-            'Upper Limit': '#d62728',
-        }
-        legend_entries = ['Probe']
-        if ts_df is not None and ts_column:
-            legend_entries.append('Tempstick')
+        probe_palette = ['#1f77b4', '#9467bd', '#17becf', '#7f7f7f']
+        tempstick_palette = ['#ff7f0e', '#bcbd22', '#8c564b', '#e377c2']
+        color_map = {}
+        for idx, legend in enumerate(probe_legends):
+            color_map[legend] = probe_palette[idx % len(probe_palette)]
+        for idx, legend in enumerate(tempstick_legends):
+            color_map[legend] = tempstick_palette[idx % len(tempstick_palette)]
+        color_map.update({'Lower Limit': '#2ca02c', 'Upper Limit': '#d62728'})
+        legend_entries = probe_legends + tempstick_legends
         has_limits = ch in ranges[name]
         if has_limits:
             legend_entries.extend(['Lower Limit', 'Upper Limit'])
