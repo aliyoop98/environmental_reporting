@@ -27,8 +27,8 @@ st.set_page_config(page_title="Environmental Reporting", layout="wide", page_ico
 st.markdown(
     """
     <style>
-        .stApp { background: linear-gradient(#e3f2fd, #bbdefb); }
-        [data-testid="stSidebar"] { background: linear-gradient(#b3e5fc, #e1f5fe); }
+        .stApp { background-color: white; }
+        [data-testid="stSidebar"] { background-color: white; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -144,6 +144,26 @@ for f in probe_files:
         df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
     dfs[name] = df.reset_index(drop=True)
 
+# Sidebar legend label configuration
+probe_labels = {}
+if dfs:
+    st.sidebar.subheader("Legend Labels")
+    st.sidebar.caption("Probe files")
+    for name in dfs:
+        probe_labels[name] = st.sidebar.text_input(
+            f"Label for {name}", value=name, key=f"label_probe_{name}"
+        )
+
+tempstick_labels = {}
+if tempdfs:
+    if not dfs:
+        st.sidebar.subheader("Legend Labels")
+    st.sidebar.caption("Tempstick files")
+    for name in tempdfs:
+        tempstick_labels[name] = st.sidebar.text_input(
+            f"Label for {name}", value=name, key=f"label_tempstick_{name}"
+        )
+
 # Year & Month selection
 years = sorted({dt.year for df in dfs.values() for dt in df['Date'].dropna()})
 months = sorted({dt.month for df in dfs.values() for dt in df['Date'].dropna()})
@@ -156,6 +176,7 @@ for name, df in dfs.items():
         st.multiselect(
             f"Match Tempsticks for {name}",
             options=list(tempdfs.keys()),
+            format_func=lambda opt: tempstick_labels.get(opt, opt),
             key=f"ts_{name}"
         )
         if tempdfs
@@ -165,6 +186,7 @@ for name, df in dfs.items():
     comparison_probes = st.multiselect(
         "Additional probe files to overlay",
         options=comparison_options,
+        format_func=lambda opt: probe_labels.get(opt, opt),
         key=f"compare_{name}"
     )
     title = st.text_input(
@@ -199,7 +221,7 @@ for name, df in dfs.items():
         probe_legends = []
         tempstick_legends = []
 
-        probe_label = f"Probe ({name})"
+        probe_label = probe_labels.get(name, name)
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
         probe_sub['Legend'] = probe_label
         series_frames.append(probe_sub)
@@ -213,7 +235,7 @@ for name, df in dfs.items():
             ].sort_values('DateTime').reset_index(drop=True)
             if ch not in comp_sel.columns:
                 continue
-            comp_label = f"Probe ({comp_name})"
+            comp_label = probe_labels.get(comp_name, comp_name)
             comp_sub = comp_sel[['DateTime', ch]].rename(columns={ch: 'Value'})
             comp_sub['Legend'] = comp_label
             series_frames.append(comp_sub)
@@ -230,7 +252,7 @@ for name, df in dfs.items():
             ts_column = _match_tempstick_channel(ts_filtered, ch)
             if not ts_column:
                 continue
-            ts_label = f"Tempstick ({ts_name})"
+            ts_label = tempstick_labels.get(ts_name, ts_name)
             ts_sub = ts_filtered[['DateTime', ts_column]].rename(columns={ts_column: 'Value'})
             ts_sub['Legend'] = ts_label
             series_frames.append(ts_sub)
@@ -285,9 +307,12 @@ for name, df in dfs.items():
             f"{title} - {ch}",
             f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         ]
-        chart = alt.layer(*layers).properties(
-            title={"text": title_lines, "anchor": "start"}
-        ).configure_title(fontSize=14, lineHeight=20, offset=10)
+        chart = (
+            alt.layer(*layers)
+            .properties(title={"text": title_lines, "anchor": "start"})
+            .configure_title(fontSize=14, lineHeight=20, offset=10)
+            .configure(background="white", view=alt.ViewConfig(fill="white", stroke=None))
+        )
         st.altair_chart(chart, use_container_width=True)
 
     st.subheader("Out-of-Range Events")
