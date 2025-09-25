@@ -35,13 +35,20 @@ st.markdown(
 )
 
 st.sidebar.header("🌦️ Data Upload & Configuration")
-probe_files = st.sidebar.file_uploader(
-    "Upload Probe CSV files",
+primary_probe_files = st.sidebar.file_uploader(
+    "Upload Primary Probe CSV files",
     accept_multiple_files=True,
-    key="probe_uploader"
+    key="primary_probe_uploader"
 )
-if not probe_files:
-    st.sidebar.info("Upload Probe CSV files to begin.")
+
+secondary_probe_files = st.sidebar.file_uploader(
+    "Upload Secondary Probe CSV files (optional)",
+    accept_multiple_files=True,
+    key="secondary_probe_uploader"
+)
+
+if not primary_probe_files:
+    st.sidebar.info("Upload Primary Probe CSV files to begin.")
     st.stop()
 
 tempstick_files = st.sidebar.file_uploader(
@@ -54,6 +61,7 @@ tempstick_files = st.sidebar.file_uploader(
 tempdfs = {}
 if tempstick_files:
     for f in tempstick_files:
+        f.seek(0)
         raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
         try:
             idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
@@ -94,69 +102,92 @@ def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]
         return 'Humidity'
     return None
 
-# Parse Probe CSVs
-dfs = {}
-ranges = {}
-for f in probe_files:
-    name = f.name
-    raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
-    try:
-        idx = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
-    except ValueError:
-        continue
-    content = ''.join(raw[idx:])
-    df = _read_csv_flexible(content)
-    if df is None:
-        continue
-    lname = name.lower()
-    has_fridge = any(term in lname for term in ('fridge', 'refrigerator'))
-    has_freezer = 'freezer' in lname
-    if has_fridge and has_freezer:
-        mapping = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
-        ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
-    elif has_fridge:
-        mapping = {'Temperature': 'P1'}
-        ranges[name] = {'Temperature': (2, 8)}
-    elif has_freezer:
-        mapping = {'Temperature': 'P1'}
-        ranges[name] = {'Temperature': (-35, -5)}
-    else:
-        cols_lower = [c.lower() for c in df.columns]
-        if any('ch4' in c for c in cols_lower):
-            mapping = {'Humidity': 'CH3', 'Temperature': 'CH4'}
+
+def _parse_probe_files(files):
+    dfs = {}
+    ranges = {}
+    if not files:
+        return dfs, ranges
+    for f in files:
+        f.seek(0)
+        name = f.name
+        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
+        try:
+            idx = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
+        except ValueError:
+            continue
+        content = ''.join(raw[idx:])
+        df = _read_csv_flexible(content)
+        if df is None:
+            continue
+        lname = name.lower()
+        has_fridge = any(term in lname for term in ('fridge', 'refrigerator'))
+        has_freezer = 'freezer' in lname
+        if has_fridge and has_freezer:
+            mapping = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
+            ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
+        elif has_fridge:
+            mapping = {'Temperature': 'P1'}
+            ranges[name] = {'Temperature': (2, 8)}
+        elif has_freezer:
+            mapping = {'Temperature': 'P1'}
+            ranges[name] = {'Temperature': (-35, -5)}
         else:
-            mapping = {'Humidity': 'CH1', 'Temperature': 'CH2'}
-        temp_range = (15, 28) if 'olympus' in lname else (15, 25)
-        ranges[name] = {'Temperature': temp_range, 'Humidity': (0, 60)}
-    mapping.update({'Date': 'Date', 'Time': 'Time'})
-    col_map = {}
-    for new, key in mapping.items():
-        col = next((c for c in df.columns if key.lower() in c.lower()), None)
-        if col:
-            col_map[col] = new
-    df = df[list(col_map)].rename(columns=col_map)
-    df['Date'] = pd.to_datetime(df['Date'], infer_datetime_format=True, errors='coerce')
-    df['DateTime'] = pd.to_datetime(
-        df['Date'].dt.strftime('%Y-%m-%d ') + df['Time'].astype(str),
-        errors='coerce'
-    )
-    for c in df.columns.difference(['Date', 'Time', 'DateTime']):
-        df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
-    dfs[name] = df.reset_index(drop=True)
+            cols_lower = [c.lower() for c in df.columns]
+            if any('ch4' in c for c in cols_lower):
+                mapping = {'Humidity': 'CH3', 'Temperature': 'CH4'}
+            else:
+                mapping = {'Humidity': 'CH1', 'Temperature': 'CH2'}
+            temp_range = (15, 28) if 'olympus' in lname else (15, 25)
+            ranges[name] = {'Temperature': temp_range, 'Humidity': (0, 60)}
+        mapping.update({'Date': 'Date', 'Time': 'Time'})
+        col_map = {}
+        for new, key in mapping.items():
+            col = next((c for c in df.columns if key.lower() in c.lower()), None)
+            if col:
+                col_map[col] = new
+        df = df[list(col_map)].rename(columns=col_map)
+        df['Date'] = pd.to_datetime(df['Date'], infer_datetime_format=True, errors='coerce')
+        df['DateTime'] = pd.to_datetime(
+            df['Date'].dt.strftime('%Y-%m-%d ') + df['Time'].astype(str),
+            errors='coerce'
+        )
+        for c in df.columns.difference(['Date', 'Time', 'DateTime']):
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
+        dfs[name] = df.reset_index(drop=True)
+    return dfs, ranges
+
+
+primary_dfs, primary_ranges = _parse_probe_files(primary_probe_files)
+if not primary_dfs:
+    st.sidebar.error("No valid primary probe data found.")
+    st.stop()
+
+secondary_dfs, _ = _parse_probe_files(secondary_probe_files)
 
 # Sidebar legend label configuration
 probe_labels = {}
-if dfs:
+if primary_dfs:
     st.sidebar.subheader("Legend Labels")
-    st.sidebar.caption("Probe files")
-    for name in dfs:
+    st.sidebar.caption("Primary probe files")
+    for name in primary_dfs:
         probe_labels[name] = st.sidebar.text_input(
-            f"Label for {name}", value=name, key=f"label_probe_{name}"
+            f"Label for {name}", value="Probe", key=f"label_probe_{name}"
+        )
+
+secondary_labels = {}
+if secondary_dfs:
+    if not primary_dfs:
+        st.sidebar.subheader("Legend Labels")
+    st.sidebar.caption("Secondary probe files")
+    for name in secondary_dfs:
+        secondary_labels[name] = st.sidebar.text_input(
+            f"Label for {name}", value=name, key=f"label_secondary_probe_{name}"
         )
 
 tempstick_labels = {}
 if tempdfs:
-    if not dfs:
+    if not primary_dfs and not secondary_dfs:
         st.sidebar.subheader("Legend Labels")
     st.sidebar.caption("Tempstick files")
     for name in tempdfs:
@@ -165,12 +196,12 @@ if tempdfs:
         )
 
 # Year & Month selection
-years = sorted({dt.year for df in dfs.values() for dt in df['Date'].dropna()})
-months = sorted({dt.month for df in dfs.values() for dt in df['Date'].dropna()})
+years = sorted({dt.year for df in primary_dfs.values() for dt in df['Date'].dropna()})
+months = sorted({dt.month for df in primary_dfs.values() for dt in df['Date'].dropna()})
 year = st.sidebar.selectbox("Year", years)
 month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
 
-for name, df in dfs.items():
+for name, df in primary_dfs.items():
     st.header(name)
     selected_tempsticks = (
         st.multiselect(
@@ -182,22 +213,45 @@ for name, df in dfs.items():
         if tempdfs
         else []
     )
-    comparison_options = [p for p in dfs.keys() if p != name]
+    comparison_options = {}
+    for other_name in primary_dfs:
+        if other_name == name:
+            continue
+        comparison_options[f"primary::{other_name}"] = ("primary", other_name)
+    for sec_name in secondary_dfs:
+        comparison_options[f"secondary::{sec_name}"] = ("secondary", sec_name)
+
+    def _format_comparison_option(opt_key):
+        source, fname = comparison_options[opt_key]
+        if source == "primary":
+            return probe_labels.get(fname, fname)
+        label = secondary_labels.get(fname, fname)
+        return f"{label} (Secondary)"
+
     comparison_probes = st.multiselect(
         "Additional probe files to overlay",
-        options=comparison_options,
-        format_func=lambda opt: probe_labels.get(opt, opt),
+        options=list(comparison_options.keys()),
+        format_func=_format_comparison_option,
         key=f"compare_{name}"
     )
+    title_state_key = f"title_{name}"
+    title_default_key = f"title_default_{name}"
+    default_title = f"{probe_labels.get(name, 'Probe')} - {calendar.month_name[month]} {year}"
+    previous_default = st.session_state.get(title_default_key)
+    if title_state_key not in st.session_state:
+        st.session_state[title_state_key] = default_title
+    elif previous_default != default_title and st.session_state[title_state_key] == previous_default:
+        st.session_state[title_state_key] = default_title
+    st.session_state[title_default_key] = default_title
     title = st.text_input(
         "Chart Title",
-        value=f"{name} - {calendar.month_name[month]} {year}",
-        key=f"title_{name}"
+        value=st.session_state[title_state_key],
+        key=title_state_key
     )
     materials = st.text_input("Materials List", key=f"materials_{name}")
     probe_id = st.text_input("Probe ID", key=f"probe_{name}")
     equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
-    channel_keys = list(ranges[name].keys())
+    channel_keys = list(primary_ranges[name].keys())
     channels = st.multiselect(
         "Channels to plot",
         options=channel_keys,
@@ -221,21 +275,29 @@ for name, df in dfs.items():
         probe_legends = []
         tempstick_legends = []
 
-        probe_label = probe_labels.get(name, name)
+        probe_label = probe_labels.get(name, "Probe")
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
         probe_sub['Legend'] = probe_label
         series_frames.append(probe_sub)
         probe_legends.append(probe_label)
 
-        for comp_name in comparison_probes:
-            comp_df = dfs[comp_name]
+        for opt_key in comparison_probes:
+            source, comp_name = comparison_options[opt_key]
+            if source == "primary":
+                comp_df = primary_dfs.get(comp_name)
+                label_dict = probe_labels
+            else:
+                comp_df = secondary_dfs.get(comp_name)
+                label_dict = secondary_labels
+            if comp_df is None:
+                continue
             comp_sel = comp_df[
                 (comp_df['Date'].dt.year == year)
                 & (comp_df['Date'].dt.month == month)
             ].sort_values('DateTime').reset_index(drop=True)
             if ch not in comp_sel.columns:
                 continue
-            comp_label = probe_labels.get(comp_name, comp_name)
+            comp_label = label_dict.get(comp_name, comp_name)
             comp_sub = comp_sel[['DateTime', ch]].rename(columns={ch: 'Value'})
             comp_sub['Legend'] = comp_label
             series_frames.append(comp_sub)
@@ -265,7 +327,7 @@ for name, df in dfs.items():
         df_chart = pd.concat(series_frames, ignore_index=True).dropna(subset=['Value'])
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
-        lo, hi = ranges[name].get(ch, (data_min, data_max))
+        lo, hi = primary_ranges[name].get(ch, (data_min, data_max))
         raw_min, raw_max = min(data_min, lo), max(data_max, hi)
         span = (raw_max - raw_min) or 1
         pad = span * 0.1
@@ -279,7 +341,7 @@ for name, df in dfs.items():
             color_map[legend] = tempstick_palette[idx % len(tempstick_palette)]
         color_map.update({'Lower Limit': '#2ca02c', 'Upper Limit': '#d62728'})
         legend_entries = probe_legends + tempstick_legends
-        has_limits = ch in ranges[name]
+        has_limits = ch in primary_ranges[name]
         if has_limits:
             legend_entries.extend(['Lower Limit', 'Upper Limit'])
         color_domain = [entry for entry in color_map if entry in legend_entries]
@@ -296,7 +358,7 @@ for name, df in dfs.items():
         line = base.mark_line()
         layers = [line]
         if has_limits:
-            lo, hi = ranges[name][ch]
+            lo, hi = primary_ranges[name][ch]
             limits_df = pd.DataFrame({'y': [lo, hi], 'Legend': ['Lower Limit', 'Upper Limit']})
             layers.append(
                 alt.Chart(limits_df)
@@ -318,7 +380,7 @@ for name, df in dfs.items():
     st.subheader("Out-of-Range Events")
     col_objs = st.columns(len(channels))
     for i, ch in enumerate(channels):
-        ch_lo, ch_hi = ranges[name].get(ch, (None, None))
+        ch_lo, ch_hi = primary_ranges[name].get(ch, (None, None))
         if ch_lo is None or ch not in sel.columns:
             continue
         df_ch = sel[['DateTime', ch]].copy()
