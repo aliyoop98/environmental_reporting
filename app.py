@@ -1,3 +1,5 @@
+import copy
+from pathlib import Path
 from typing import Optional
 
 import streamlit as st
@@ -201,76 +203,68 @@ months = sorted({dt.month for df in primary_dfs.values() for dt in df['Date'].dr
 year = st.sidebar.selectbox("Year", years)
 month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
 
-for name, df in primary_dfs.items():
-    st.header(name)
-    selected_tempsticks = (
-        st.multiselect(
-            f"Match Tempsticks for {name}",
-            options=list(tempdfs.keys()),
-            format_func=lambda opt: tempstick_labels.get(opt, opt),
-            key=f"ts_{name}"
-        )
-        if tempdfs
-        else []
-    )
-    comparison_options = {}
-    for other_name in primary_dfs:
-        if other_name == name:
-            continue
-        comparison_options[f"primary::{other_name}"] = ("primary", other_name)
-    for sec_name in secondary_dfs:
-        comparison_options[f"secondary::{sec_name}"] = ("secondary", sec_name)
+primary_names = list(primary_dfs.keys())
+selected_primary = st.sidebar.selectbox("Select Primary Probe", primary_names)
 
-    def _format_comparison_option(opt_key):
-        source, fname = comparison_options[opt_key]
-        if source == "primary":
-            return probe_labels.get(fname, fname)
-        label = secondary_labels.get(fname, fname)
-        return f"{label} (Secondary)"
+st.session_state.setdefault("generated_results", {})
+st.session_state.setdefault("saved_results", [])
 
-    comparison_probes = st.multiselect(
-        "Additional probe files to overlay",
-        options=list(comparison_options.keys()),
-        format_func=_format_comparison_option,
-        key=f"compare_{name}"
-    )
-    title_state_key = f"title_{name}"
-    title_default_key = f"title_default_{name}"
-    default_title = f"{probe_labels.get(name, 'Probe')} - {calendar.month_name[month]} {year}"
-    previous_default = st.session_state.get(title_default_key)
-    if title_state_key not in st.session_state:
-        st.session_state[title_state_key] = default_title
-    elif previous_default != default_title and st.session_state[title_state_key] == previous_default:
-        st.session_state[title_state_key] = default_title
-    st.session_state[title_default_key] = default_title
-    title = st.text_input(
-        "Chart Title",
-        value=st.session_state[title_state_key],
-        key=title_state_key
-    )
-    materials = st.text_input("Materials List", key=f"materials_{name}")
-    probe_id = st.text_input("Probe ID", key=f"probe_{name}")
-    equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
-    channel_keys = list(primary_ranges[name].keys())
-    channels = st.multiselect(
-        "Channels to plot",
-        options=channel_keys,
-        default=channel_keys,
-        key=f"channels_{name}"
-    )
 
-    if not st.button(f"Generate {name}", key=f"btn_{name}"):
-        continue
+def _build_outputs(
+    name,
+    df,
+    year,
+    month,
+    channels,
+    comparison_probes,
+    comparison_options,
+    primary_dfs,
+    secondary_dfs,
+    probe_labels,
+    secondary_labels,
+    tempdfs,
+    tempstick_labels,
+    selected_tempsticks,
+    primary_ranges,
+    materials,
+    probe_id,
+    equip_id,
+):
+    result = {
+        "name": name,
+        "chart_title": Path(name).stem,
+        "year": year,
+        "month": month,
+        "materials": materials,
+        "probe_id": probe_id,
+        "equip_id": equip_id,
+        "channels": channels,
+        "channel_results": {},
+        "warnings": [],
+    }
 
     sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
     if sel.empty:
-        st.warning("No data for selected period.")
-        continue
+        result["warnings"].append("No data for selected period.")
+        return result
 
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
 
     for ch in channels:
+        channel_info = {
+            "chart": None,
+            "warning": None,
+            "oor_table": None,
+            "total_minutes": 0.0,
+            "incident": False,
+        }
+
+        if ch not in sel.columns:
+            channel_info["warning"] = f"Channel {ch} not found in data."
+            result["channel_results"][ch] = channel_info
+            continue
+
         series_frames = []
         probe_legends = []
         tempstick_legends = []
@@ -321,10 +315,16 @@ for name, df in primary_dfs.items():
             tempstick_legends.append(ts_label)
 
         if not series_frames:
-            st.warning(f"No data available to chart for channel {ch}.")
+            channel_info["warning"] = f"No data available to chart for channel {ch}."
+            result["channel_results"][ch] = channel_info
             continue
 
         df_chart = pd.concat(series_frames, ignore_index=True).dropna(subset=['Value'])
+        if df_chart.empty:
+            channel_info["warning"] = f"No valid values available for channel {ch}."
+            result["channel_results"][ch] = channel_info
+            continue
+
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
         lo, hi = primary_ranges[name].get(ch, (data_min, data_max))
@@ -352,7 +352,7 @@ for name, df in primary_dfs.items():
             color=alt.Color(
                 'Legend:N',
                 scale=color_scale,
-                legend=alt.Legend(title='Series', labelLimit=0)
+                legend=alt.Legend(title='Probe', labelLimit=0)
             )
         )
         line = base.mark_line()
@@ -366,7 +366,7 @@ for name, df in primary_dfs.items():
                 .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
             )
         title_lines = [
-            f"{title} - {ch}",
+            f"{result['chart_title']} - {ch}",
             f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         ]
         chart = (
@@ -375,37 +375,165 @@ for name, df in primary_dfs.items():
             .configure_title(fontSize=14, lineHeight=20, offset=10)
             .configure(background="white", view=alt.ViewConfig(fill="white", stroke=None))
         )
-        st.altair_chart(chart, use_container_width=True)
+        channel_info["chart"] = chart
 
-    st.subheader("Out-of-Range Events")
-    col_objs = st.columns(len(channels))
-    for i, ch in enumerate(channels):
         ch_lo, ch_hi = primary_ranges[name].get(ch, (None, None))
-        if ch_lo is None or ch not in sel.columns:
-            continue
-        df_ch = sel[['DateTime', ch]].copy()
-        df_ch['OOR'] = df_ch[ch].apply(lambda v: pd.notna(v) and (v < ch_lo or v > ch_hi))
-        df_ch['Group'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
-        events = []
-        for gid, grp in df_ch.groupby('Group'):
-            if not grp['OOR'].iloc[0]:
-                continue
-            start = grp['DateTime'].iloc[0]
-            last_idx = grp.index[-1]
-            if last_idx + 1 < len(sel) and not df_ch.loc[last_idx+1, 'OOR']:
-                end = sel.loc[last_idx+1, 'DateTime']
-            else:
-                end = grp['DateTime'].iloc[-1]
-            duration = max((end - start).total_seconds() / 60, 0)
-            events.append({'Start': start, 'End': end, 'Duration(min)': duration})
-        with col_objs[i]:
-            st.markdown(f"### {ch} OOR Events")
+        if ch_lo is not None:
+            df_ch = sel[['DateTime', ch]].copy()
+            df_ch['OOR'] = df_ch[ch].apply(lambda v: pd.notna(v) and (v < ch_lo or v > ch_hi))
+            df_ch['Group'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
+            events = []
+            for _, grp in df_ch.groupby('Group'):
+                if not grp['OOR'].iloc[0]:
+                    continue
+                start = grp['DateTime'].iloc[0]
+                last_idx = grp.index[-1]
+                if last_idx + 1 < len(sel) and not df_ch.loc[last_idx + 1, 'OOR']:
+                    end = sel.loc[last_idx + 1, 'DateTime']
+                else:
+                    end = grp['DateTime'].iloc[-1]
+                duration = max((end - start).total_seconds() / 60, 0)
+                events.append({'Start': start, 'End': end, 'Duration(min)': duration})
             if events:
                 ev_df = pd.DataFrame(events)
+                channel_info['oor_table'] = ev_df
                 total = ev_df['Duration(min)'].sum()
                 incident = total >= 60 or any(ev_df['Duration(min)'] > 60)
+                channel_info['total_minutes'] = float(total)
+                channel_info['incident'] = bool(incident)
+            else:
+                channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)'])
+
+        result["channel_results"][ch] = channel_info
+
+    return result
+
+
+name = selected_primary
+df = primary_dfs[name]
+st.header(name)
+selected_tempsticks = (
+    st.multiselect(
+        f"Match Tempsticks for {name}",
+        options=list(tempdfs.keys()),
+        format_func=lambda opt: tempstick_labels.get(opt, opt),
+        key=f"ts_{name}"
+    )
+    if tempdfs
+    else []
+)
+comparison_options = {}
+for other_name in primary_dfs:
+    if other_name == name:
+        continue
+    comparison_options[f"primary::{other_name}"] = ("primary", other_name)
+for sec_name in secondary_dfs:
+    comparison_options[f"secondary::{sec_name}"] = ("secondary", sec_name)
+
+
+def _format_comparison_option(opt_key):
+    source, fname = comparison_options[opt_key]
+    if source == "primary":
+        return probe_labels.get(fname, fname)
+    label = secondary_labels.get(fname, fname)
+    return f"{label} (Secondary)"
+
+
+comparison_probes = st.multiselect(
+    "Additional probe files to overlay",
+    options=list(comparison_options.keys()),
+    format_func=_format_comparison_option,
+    key=f"compare_{name}"
+)
+materials = st.text_input("Materials List", key=f"materials_{name}")
+probe_id = st.text_input("Probe ID", key=f"probe_{name}")
+equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
+channel_keys = list(primary_ranges[name].keys())
+channels = st.multiselect(
+    "Channels to plot",
+    options=channel_keys,
+    default=channel_keys,
+    key=f"channels_{name}"
+)
+
+generate_clicked = st.button(f"Generate {name}", key=f"btn_{name}")
+if generate_clicked:
+    result = _build_outputs(
+        name,
+        df,
+        year,
+        month,
+        channels,
+        comparison_probes,
+        comparison_options,
+        primary_dfs,
+        secondary_dfs,
+        probe_labels,
+        secondary_labels,
+        tempdfs,
+        tempstick_labels,
+        selected_tempsticks,
+        primary_ranges,
+        materials,
+        probe_id,
+        equip_id,
+    )
+    st.session_state["generated_results"][name] = result
+
+current_result = st.session_state["generated_results"].get(name)
+if current_result:
+    if current_result["year"] != year or current_result["month"] != month:
+        st.info(
+            "Displaying previously generated results. Adjust filters and press Generate to refresh."
+        )
+    if current_result["warnings"]:
+        for msg in current_result["warnings"]:
+            st.warning(msg)
+
+    has_content = False
+    for ch in current_result["channels"]:
+        ch_result = current_result["channel_results"].get(ch)
+        if not ch_result:
+            continue
+        if ch_result.get("warning"):
+            st.warning(ch_result["warning"])
+            continue
+        if ch_result.get("chart"):
+            st.altair_chart(ch_result["chart"], use_container_width=True)
+            has_content = True
+        if ch_result.get("oor_table") is not None:
+            st.markdown(f"### {ch} OOR Events")
+            ev_df = ch_result["oor_table"]
+            if not ev_df.empty:
                 st.table(ev_df)
-                st.write(f"**Total OOR minutes:** {total:.1f}")
-                st.write(f"**Incident:** {'YES' if incident else 'No'}")
+                st.write(f"**Total OOR minutes:** {ch_result['total_minutes']:.1f}")
+                st.write(f"**Incident:** {'YES' if ch_result['incident'] else 'No'}")
             else:
                 st.info("No out-of-range events detected.")
+            has_content = True
+
+    if has_content and st.button("Save results for this session", key=f"save_{name}"):
+        st.session_state["saved_results"].append(copy.deepcopy(current_result))
+        st.success("Results saved. Scroll down to review saved charts and tables.")
+
+if st.session_state["saved_results"]:
+    st.header("Saved Charts & OOR Summaries")
+    for idx, saved in enumerate(st.session_state["saved_results"], start=1):
+        st.subheader(
+            f"{idx}. {saved['chart_title']} - {calendar.month_name[saved['month']]} {saved['year']}"
+        )
+        for ch in saved["channels"]:
+            saved_ch = saved["channel_results"].get(ch)
+            if not saved_ch or saved_ch.get("warning"):
+                continue
+            st.markdown(f"#### {ch}")
+            if saved_ch.get("chart"):
+                st.altair_chart(saved_ch["chart"], use_container_width=True)
+            if saved_ch.get("oor_table") is not None:
+                ev_df = saved_ch["oor_table"]
+                if not ev_df.empty:
+                    st.table(ev_df)
+                    st.write(f"**Total OOR minutes:** {saved_ch['total_minutes']:.1f}")
+                    st.write(f"**Incident:** {'YES' if saved_ch['incident'] else 'No'}")
+                else:
+                    st.info("No out-of-range events detected.")
