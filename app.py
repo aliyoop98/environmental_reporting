@@ -43,53 +43,9 @@ primary_probe_files = st.sidebar.file_uploader(
     key="primary_probe_uploader"
 )
 
-secondary_probe_files = st.sidebar.file_uploader(
-    "Upload Secondary Probe CSV files (optional)",
-    accept_multiple_files=True,
-    key="secondary_probe_uploader"
-)
-
 if not primary_probe_files:
     st.sidebar.info("Upload Primary Probe CSV files to begin.")
     st.stop()
-
-tempstick_files = st.sidebar.file_uploader(
-    "Upload Tempstick CSV files (optional)",
-    accept_multiple_files=True,
-    key="tempstick_uploads"
-)
-
-# Parse Tempstick CSVs
-tempdfs = {}
-if tempstick_files:
-    for f in tempstick_files:
-        f.seek(0)
-        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
-        try:
-            idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
-        except ValueError:
-            continue
-        csv_text = ''.join(raw[idx:])
-        df_ts = _read_csv_flexible(csv_text)
-        if df_ts is None:
-            continue
-        ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
-        if not ts_col:
-            continue
-        df_ts = df_ts.rename(columns={ts_col: 'DateTime'})
-        df_ts['DateTime'] = pd.to_datetime(df_ts['DateTime'], infer_datetime_format=True, errors='coerce')
-        temp_col = next((c for c in df_ts.columns if 'temp' in c.lower()), None)
-        if temp_col:
-            df_ts['Temperature'] = pd.to_numeric(df_ts[temp_col].astype(str).str.replace('+',''), errors='coerce')
-        hum_col = next((c for c in df_ts.columns if 'hum' in c.lower()), None)
-        if hum_col:
-            df_ts['Humidity'] = pd.to_numeric(df_ts[hum_col].astype(str).str.replace('+',''), errors='coerce')
-        cols = ['DateTime']
-        if 'Temperature' in df_ts.columns:
-            cols.append('Temperature')
-        if 'Humidity' in df_ts.columns:
-            cols.append('Humidity')
-        tempdfs[f.name] = df_ts[cols]
 
 
 def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]:
@@ -160,42 +116,51 @@ def _parse_probe_files(files):
     return dfs, ranges
 
 
+def _parse_tempstick_files(files):
+    tempdfs = {}
+    if not files:
+        return tempdfs
+    for f in files:
+        f.seek(0)
+        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
+        try:
+            idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
+        except ValueError:
+            continue
+        csv_text = ''.join(raw[idx:])
+        df_ts = _read_csv_flexible(csv_text)
+        if df_ts is None:
+            continue
+        ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
+        if not ts_col:
+            continue
+        df_ts = df_ts.rename(columns={ts_col: 'DateTime'})
+        df_ts['DateTime'] = pd.to_datetime(
+            df_ts['DateTime'], infer_datetime_format=True, errors='coerce'
+        )
+        temp_col = next((c for c in df_ts.columns if 'temp' in c.lower()), None)
+        if temp_col:
+            df_ts['Temperature'] = pd.to_numeric(
+                df_ts[temp_col].astype(str).str.replace('+', ''), errors='coerce'
+            )
+        hum_col = next((c for c in df_ts.columns if 'hum' in c.lower()), None)
+        if hum_col:
+            df_ts['Humidity'] = pd.to_numeric(
+                df_ts[hum_col].astype(str).str.replace('+', ''), errors='coerce'
+            )
+        cols = ['DateTime']
+        if 'Temperature' in df_ts.columns:
+            cols.append('Temperature')
+        if 'Humidity' in df_ts.columns:
+            cols.append('Humidity')
+        tempdfs[f.name] = df_ts[cols]
+    return tempdfs
+
+
 primary_dfs, primary_ranges = _parse_probe_files(primary_probe_files)
 if not primary_dfs:
     st.sidebar.error("No valid primary probe data found.")
     st.stop()
-
-secondary_dfs, _ = _parse_probe_files(secondary_probe_files)
-
-# Sidebar legend label configuration
-probe_labels = {}
-if primary_dfs:
-    st.sidebar.subheader("Legend Labels")
-    st.sidebar.caption("Primary probe files")
-    for name in primary_dfs:
-        probe_labels[name] = st.sidebar.text_input(
-            f"Label for {name}", value="Probe", key=f"label_probe_{name}"
-        )
-
-secondary_labels = {}
-if secondary_dfs:
-    if not primary_dfs:
-        st.sidebar.subheader("Legend Labels")
-    st.sidebar.caption("Secondary probe files")
-    for name in secondary_dfs:
-        secondary_labels[name] = st.sidebar.text_input(
-            f"Label for {name}", value=name, key=f"label_secondary_probe_{name}"
-        )
-
-tempstick_labels = {}
-if tempdfs:
-    if not primary_dfs and not secondary_dfs:
-        st.sidebar.subheader("Legend Labels")
-    st.sidebar.caption("Tempstick files")
-    for name in tempdfs:
-        tempstick_labels[name] = st.sidebar.text_input(
-            f"Label for {name}", value=name, key=f"label_tempstick_{name}"
-        )
 
 # Year & Month selection
 years = sorted({dt.year for df in primary_dfs.values() for dt in df['Date'].dropna()})
@@ -203,8 +168,12 @@ months = sorted({dt.month for df in primary_dfs.values() for dt in df['Date'].dr
 year = st.sidebar.selectbox("Year", years)
 month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
 
-primary_names = list(primary_dfs.keys())
-selected_primary = st.sidebar.selectbox("Select Primary Probe", primary_names)
+for name in primary_dfs:
+    st.session_state.setdefault(f"chart_title_{name}", Path(name).stem)
+    st.session_state.setdefault(f"primary_label_{name}", "Probe")
+    st.session_state.setdefault(f"materials_{name}", "")
+    st.session_state.setdefault(f"probe_{name}", "")
+    st.session_state.setdefault(f"equip_{name}", "")
 
 st.session_state.setdefault("generated_results", {})
 st.session_state.setdefault("saved_results", [])
@@ -212,6 +181,7 @@ st.session_state.setdefault("saved_results", [])
 
 def _build_outputs(
     name,
+    chart_title,
     df,
     year,
     month,
@@ -230,9 +200,10 @@ def _build_outputs(
     probe_id,
     equip_id,
 ):
+    title = chart_title or Path(name).stem
     result = {
         "name": name,
-        "chart_title": Path(name).stem,
+        "chart_title": title,
         "year": year,
         "month": month,
         "materials": materials,
@@ -366,7 +337,7 @@ def _build_outputs(
                 .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
             )
         title_lines = [
-            f"{result['chart_title']} - {ch}",
+            f"{title} - {ch}",
             f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         ]
         chart = (
@@ -409,112 +380,173 @@ def _build_outputs(
     return result
 
 
-name = selected_primary
-df = primary_dfs[name]
-st.header(name)
-selected_tempsticks = (
-    st.multiselect(
-        f"Match Tempsticks for {name}",
-        options=list(tempdfs.keys()),
-        format_func=lambda opt: tempstick_labels.get(opt, opt),
-        key=f"ts_{name}"
-    )
-    if tempdfs
-    else []
-)
-comparison_options = {}
-for other_name in primary_dfs:
-    if other_name == name:
-        continue
-    comparison_options[f"primary::{other_name}"] = ("primary", other_name)
-for sec_name in secondary_dfs:
-    comparison_options[f"secondary::{sec_name}"] = ("secondary", sec_name)
+tab_titles = [Path(name).stem for name in primary_dfs]
+tabs = st.tabs(tab_titles)
+for tab, name in zip(tabs, primary_dfs):
+    with tab:
+        df = primary_dfs[name]
+        st.subheader(name)
 
+        st.markdown("### Chart Details")
+        chart_title_key = f"chart_title_{name}"
+        chart_title = st.text_input("Chart Title", key=chart_title_key)
+        materials_key = f"materials_{name}"
+        materials = st.text_input("Materials List", key=materials_key)
+        probe_id_key = f"probe_{name}"
+        probe_id = st.text_input("Probe ID", key=probe_id_key)
+        equip_id_key = f"equip_{name}"
+        equip_id = st.text_input("Equipment ID", key=equip_id_key)
 
-def _format_comparison_option(opt_key):
-    source, fname = comparison_options[opt_key]
-    if source == "primary":
-        return probe_labels.get(fname, fname)
-    label = secondary_labels.get(fname, fname)
-    return f"{label} (Secondary)"
-
-
-comparison_probes = st.multiselect(
-    "Additional probe files to overlay",
-    options=list(comparison_options.keys()),
-    format_func=_format_comparison_option,
-    key=f"compare_{name}"
-)
-materials = st.text_input("Materials List", key=f"materials_{name}")
-probe_id = st.text_input("Probe ID", key=f"probe_{name}")
-equip_id = st.text_input("Equipment ID", key=f"equip_{name}")
-channel_keys = list(primary_ranges[name].keys())
-channels = st.multiselect(
-    "Channels to plot",
-    options=channel_keys,
-    default=channel_keys,
-    key=f"channels_{name}"
-)
-
-generate_clicked = st.button(f"Generate {name}", key=f"btn_{name}")
-if generate_clicked:
-    result = _build_outputs(
-        name,
-        df,
-        year,
-        month,
-        channels,
-        comparison_probes,
-        comparison_options,
-        primary_dfs,
-        secondary_dfs,
-        probe_labels,
-        secondary_labels,
-        tempdfs,
-        tempstick_labels,
-        selected_tempsticks,
-        primary_ranges,
-        materials,
-        probe_id,
-        equip_id,
-    )
-    st.session_state["generated_results"][name] = result
-
-current_result = st.session_state["generated_results"].get(name)
-if current_result:
-    if current_result["year"] != year or current_result["month"] != month:
-        st.info(
-            "Displaying previously generated results. Adjust filters and press Generate to refresh."
+        st.markdown("### Data Uploads")
+        secondary_files = st.file_uploader(
+            "Upload Secondary Probe CSV files (optional)",
+            accept_multiple_files=True,
+            key=f"secondary_{name}"
         )
-    if current_result["warnings"]:
-        for msg in current_result["warnings"]:
-            st.warning(msg)
+        secondary_dfs, _ = _parse_probe_files(secondary_files)
+        tempstick_files = st.file_uploader(
+            "Upload Tempstick CSV files (optional)",
+            accept_multiple_files=True,
+            key=f"tempstick_{name}"
+        )
+        tempdfs = _parse_tempstick_files(tempstick_files)
 
-    has_content = False
-    for ch in current_result["channels"]:
-        ch_result = current_result["channel_results"].get(ch)
-        if not ch_result:
-            continue
-        if ch_result.get("warning"):
-            st.warning(ch_result["warning"])
-            continue
-        if ch_result.get("chart"):
-            st.altair_chart(ch_result["chart"], use_container_width=True)
-            has_content = True
-        if ch_result.get("oor_table") is not None:
-            st.markdown(f"### {ch} OOR Events")
-            ev_df = ch_result["oor_table"]
-            if not ev_df.empty:
-                st.table(ev_df)
-                st.write(f"**Total OOR minutes:** {ch_result['total_minutes']:.1f}")
-                st.write(f"**Incident:** {'YES' if ch_result['incident'] else 'No'}")
-            else:
-                st.info("No out-of-range events detected.")
-            has_content = True
+        st.markdown("### Legend Labels")
+        primary_label_key = f"primary_label_{name}"
+        st.text_input("Legend label for primary data", key=primary_label_key)
+        all_primary_labels = {
+            fname: (st.session_state.get(f"primary_label_{fname}") or "Probe")
+            for fname in primary_dfs
+        }
 
-    if has_content and st.button("Save results for this session", key=f"save_{name}"):
-        st.session_state["saved_results"].append(copy.deepcopy(current_result))
-        st.success("Results saved. Scroll down to review saved charts and tables.")
+        secondary_labels = {}
+        if secondary_dfs:
+            st.caption("Secondary probe files")
+            for sec_name in secondary_dfs:
+                key = f"label_secondary_{name}_{sec_name}"
+                st.session_state.setdefault(key, sec_name)
+                secondary_labels[sec_name] = st.text_input(
+                    f"Label for {sec_name}",
+                    key=key
+                )
+
+        tempstick_labels = {}
+        if tempdfs:
+            st.caption("Tempstick files")
+            for ts_name in tempdfs:
+                key = f"label_tempstick_{name}_{ts_name}"
+                st.session_state.setdefault(key, ts_name)
+                tempstick_labels[ts_name] = st.text_input(
+                    f"Label for {ts_name}",
+                    key=key
+                )
+
+        selected_tempsticks = (
+            st.multiselect(
+                "Match Tempsticks",
+                options=list(tempdfs.keys()),
+                format_func=lambda opt: tempstick_labels.get(opt, opt),
+                key=f"ts_{name}"
+            )
+            if tempdfs
+            else []
+        )
+
+        comparison_options = {}
+        for other_name in primary_dfs:
+            if other_name == name:
+                continue
+            comparison_options[f"primary::{other_name}"] = ("primary", other_name)
+        for sec_name in secondary_dfs:
+            comparison_options[f"secondary::{sec_name}"] = ("secondary", sec_name)
+
+        def _format_option(opt_key):
+            source, fname = comparison_options[opt_key]
+            if source == "primary":
+                return all_primary_labels.get(fname, fname)
+            label = secondary_labels.get(fname, fname)
+            return f"{label} (Secondary)"
+
+        format_func = _format_option if comparison_options else None
+        comparison_probes = st.multiselect(
+            "Additional probe files to overlay",
+            options=list(comparison_options.keys()),
+            format_func=format_func,
+            key=f"compare_{name}"
+        )
+
+        channel_keys = list(primary_ranges[name].keys())
+        channels = st.multiselect(
+            "Channels to plot",
+            options=channel_keys,
+            default=channel_keys,
+            key=f"channels_{name}"
+        )
+
+        generate_clicked = st.button(f"Generate {name}", key=f"btn_{name}")
+        if generate_clicked:
+            chart_title_value = (chart_title or "").strip() or Path(name).stem
+            materials_value = materials or ""
+            probe_id_value = probe_id or ""
+            equip_id_value = equip_id or ""
+            result = _build_outputs(
+                name,
+                chart_title_value,
+                df,
+                year,
+                month,
+                channels,
+                comparison_probes,
+                comparison_options,
+                primary_dfs,
+                secondary_dfs,
+                all_primary_labels,
+                secondary_labels,
+                tempdfs,
+                tempstick_labels,
+                selected_tempsticks,
+                primary_ranges,
+                materials_value,
+                probe_id_value,
+                equip_id_value,
+            )
+            st.session_state["generated_results"][name] = result
+
+        current_result = st.session_state["generated_results"].get(name)
+        if current_result:
+            if current_result["year"] != year or current_result["month"] != month:
+                st.info(
+                    "Displaying previously generated results. Adjust filters and press Generate to refresh."
+                )
+            if current_result["warnings"]:
+                for msg in current_result["warnings"]:
+                    st.warning(msg)
+
+            has_content = False
+            for ch in current_result["channels"]:
+                ch_result = current_result["channel_results"].get(ch)
+                if not ch_result:
+                    continue
+                if ch_result.get("warning"):
+                    st.warning(ch_result["warning"])
+                    continue
+                if ch_result.get("chart"):
+                    st.altair_chart(ch_result["chart"], use_container_width=True)
+                    has_content = True
+                if ch_result.get("oor_table") is not None:
+                    st.markdown(f"### {ch} OOR Events")
+                    ev_df = ch_result["oor_table"]
+                    if not ev_df.empty:
+                        st.table(ev_df)
+                        st.write(f"**Total OOR minutes:** {ch_result['total_minutes']:.1f}")
+                        st.write(f"**Incident:** {'YES' if ch_result['incident'] else 'No'}")
+                    else:
+                        st.info("No out-of-range events detected.")
+                    has_content = True
+
+            if has_content and st.button("Save results for this session", key=f"save_{name}"):
+                st.session_state["saved_results"].append(copy.deepcopy(current_result))
+                st.success("Results saved. Scroll down to review saved charts and tables.")
 
 if st.session_state["saved_results"]:
     st.header("Saved Charts & OOR Summaries")
