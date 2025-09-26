@@ -96,8 +96,10 @@ def _parse_probe_files(files):
                 mapping = {'Humidity': 'CH3', 'Temperature': 'CH4'}
             else:
                 mapping = {'Humidity': 'CH1', 'Temperature': 'CH2'}
-            temp_range = (15, 28) if 'olympus' in lname else (15, 25)
-            ranges[name] = {'Temperature': temp_range, 'Humidity': (0, 60)}
+            is_olympus = 'olympus' in lname
+            temp_range = (15, 28) if is_olympus else (15, 25)
+            humidity_range = (0, 80) if is_olympus else (0, 60)
+            ranges[name] = {'Temperature': temp_range, 'Humidity': humidity_range}
         mapping.update({'Date': 'Date', 'Time': 'Time'})
         col_map = {}
         for new, key in mapping.items():
@@ -200,10 +202,12 @@ def _build_outputs(
     probe_id,
     equip_id,
 ):
-    title = chart_title or Path(name).stem
+    base_title = chart_title or Path(name).stem
+    period_label = f"{calendar.month_name[month]} {year}"
+    title_with_period = f"{base_title} - {period_label}"
     result = {
         "name": name,
-        "chart_title": title,
+        "chart_title": title_with_period,
         "year": year,
         "month": month,
         "materials": materials,
@@ -337,7 +341,7 @@ def _build_outputs(
                 .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
             )
         title_lines = [
-            f"{title} - {ch}",
+            f"{title_with_period} - {ch}",
             f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}"
         ]
         chart = (
@@ -551,9 +555,7 @@ for tab, name in zip(tabs, primary_dfs):
 if st.session_state["saved_results"]:
     st.header("Saved Charts & OOR Summaries")
     for idx, saved in enumerate(st.session_state["saved_results"], start=1):
-        st.subheader(
-            f"{idx}. {saved['chart_title']} - {calendar.month_name[saved['month']]} {saved['year']}"
-        )
+        st.subheader(f"{idx}. {saved['chart_title']}")
         for ch in saved["channels"]:
             saved_ch = saved["channel_results"].get(ch)
             if not saved_ch or saved_ch.get("warning"):
