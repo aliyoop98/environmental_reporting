@@ -4,26 +4,12 @@ from typing import Optional
 
 import streamlit as st
 import pandas as pd
-import io
 import calendar
 import altair as alt
 from datetime import datetime, timedelta
 
+from data_processing import _parse_probe_files, _parse_tempstick_files
 
-def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
-    """Read CSV content supporting multiple delimiters.
-
-    Tries automatic delimiter detection first (e.g., tab separated files) and
-    falls back to the default comma behaviour if necessary.
-    """
-
-    for kwargs in ({"sep": None, "engine": "python"}, {}):
-        try:
-            df = pd.read_csv(io.StringIO(text), on_bad_lines="skip", **kwargs)
-        except Exception:
-            continue
-        return df.rename(columns=lambda c: c.strip() if isinstance(c, str) else c)
-    return None
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="⛅")
 st.markdown(
@@ -59,105 +45,6 @@ def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]
     if 'hum' in ch_lower and 'Humidity' in ts_df.columns:
         return 'Humidity'
     return None
-
-
-def _parse_probe_files(files):
-    dfs = {}
-    ranges = {}
-    if not files:
-        return dfs, ranges
-    for f in files:
-        f.seek(0)
-        name = f.name
-        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
-        try:
-            idx = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
-        except ValueError:
-            continue
-        content = ''.join(raw[idx:])
-        df = _read_csv_flexible(content)
-        if df is None:
-            continue
-        lname = name.lower()
-        has_fridge = any(term in lname for term in ('fridge', 'refrigerator'))
-        has_freezer = 'freezer' in lname
-        if has_fridge and has_freezer:
-            mapping = {'Fridge Temp': 'P1', 'Freezer Temp': 'P2'}
-            ranges[name] = {'Fridge Temp': (2, 8), 'Freezer Temp': (-35, -5)}
-        elif has_fridge:
-            mapping = {'Temperature': 'P1'}
-            ranges[name] = {'Temperature': (2, 8)}
-        elif has_freezer:
-            mapping = {'Temperature': 'P1'}
-            ranges[name] = {'Temperature': (-35, -5)}
-        else:
-            cols_lower = [c.lower() for c in df.columns]
-            if any('ch4' in c for c in cols_lower):
-                mapping = {'Humidity': 'CH3', 'Temperature': 'CH4'}
-            else:
-                mapping = {'Humidity': 'CH1', 'Temperature': 'CH2'}
-            is_olympus = 'olympus' in lname
-            temp_range = (15, 28) if is_olympus else (15, 25)
-            humidity_range = (0, 80) if is_olympus else (0, 60)
-            ranges[name] = {'Temperature': temp_range, 'Humidity': humidity_range}
-        mapping.update({'Date': 'Date', 'Time': 'Time'})
-        col_map = {}
-        for new, key in mapping.items():
-            col = next((c for c in df.columns if key.lower() in c.lower()), None)
-            if col:
-                col_map[col] = new
-        df = df[list(col_map)].rename(columns=col_map)
-        df['Date'] = pd.to_datetime(df['Date'], infer_datetime_format=True, errors='coerce')
-        df['DateTime'] = pd.to_datetime(
-            df['Date'].dt.strftime('%Y-%m-%d ') + df['Time'].astype(str),
-            errors='coerce'
-        )
-        for c in df.columns.difference(['Date', 'Time', 'DateTime']):
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
-        dfs[name] = df.reset_index(drop=True)
-    return dfs, ranges
-
-
-def _parse_tempstick_files(files):
-    tempdfs = {}
-    if not files:
-        return tempdfs
-    for f in files:
-        f.seek(0)
-        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
-        try:
-            idx = max(i for i, line in enumerate(raw) if 'timestamp' in line.lower())
-        except ValueError:
-            continue
-        csv_text = ''.join(raw[idx:])
-        df_ts = _read_csv_flexible(csv_text)
-        if df_ts is None:
-            continue
-        ts_col = next((c for c in df_ts.columns if 'timestamp' in c.lower()), None)
-        if not ts_col:
-            continue
-        df_ts = df_ts.rename(columns={ts_col: 'DateTime'})
-        df_ts['DateTime'] = pd.to_datetime(
-            df_ts['DateTime'], infer_datetime_format=True, errors='coerce'
-        )
-        temp_col = next((c for c in df_ts.columns if 'temp' in c.lower()), None)
-        if temp_col:
-            df_ts['Temperature'] = pd.to_numeric(
-                df_ts[temp_col].astype(str).str.replace('+', ''), errors='coerce'
-            )
-        hum_col = next((c for c in df_ts.columns if 'hum' in c.lower()), None)
-        if hum_col:
-            df_ts['Humidity'] = pd.to_numeric(
-                df_ts[hum_col].astype(str).str.replace('+', ''), errors='coerce'
-            )
-        cols = ['DateTime']
-        if 'Temperature' in df_ts.columns:
-            cols.append('Temperature')
-        if 'Humidity' in df_ts.columns:
-            cols.append('Humidity')
-        tempdfs[f.name] = df_ts[cols]
-    return tempdfs
-
 
 primary_dfs, primary_ranges = _parse_probe_files(primary_probe_files)
 if not primary_dfs:
