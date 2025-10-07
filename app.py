@@ -2,7 +2,7 @@ import copy
 import hashlib
 from pathlib import Path
 import sys
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
@@ -20,7 +20,6 @@ if __package__:
         _parse_probe_files,
         _parse_tempstick_files,
         parse_serial_csv,
-        serial_data_to_primary,
     )
 else:
     if str(CURRENT_DIR) not in sys.path:
@@ -44,15 +43,15 @@ st.markdown(
 )
 
 st.sidebar.header("🌦️ Data Upload & Configuration")
-primary_probe_files = st.sidebar.file_uploader(
-    "Upload Primary Probe CSV files",
-    accept_multiple_files=True,
-    key="primary_probe_uploader"
-)
 serial_files = st.sidebar.file_uploader(
     "Upload Consolidated Serial CSV files",
     accept_multiple_files=True,
     key="serial_uploader"
+)
+probe_files = st.sidebar.file_uploader(
+    "Upload Probe CSV files (optional)",
+    accept_multiple_files=True,
+    key="probe_uploader"
 )
 
 
@@ -73,75 +72,195 @@ def _state_key(prefix: str, identifier: str) -> str:
     digest = hashlib.sha1(identifier.encode('utf-8')).hexdigest()[:10]
     return f"{prefix}_{digest}"
 
-primary_dfs, primary_ranges = _parse_probe_files(primary_probe_files)
-serial_data = parse_serial_csv(serial_files)
+def _prepare_serial_primary(
+    serial_data: Dict[str, Dict[str, object]]
+) -> Tuple[
+    Dict[str, pd.DataFrame],
+    Dict[str, Dict[str, Tuple[float, float]]],
+    Dict[str, Dict[str, object]],
+]:
+    """Aggregate serial datasets by serial number for primary charting."""
 
-using_serial_as_primary = False
-if not primary_dfs and serial_data:
-    using_serial_as_primary = True
-    primary_dfs, primary_ranges = serial_data_to_primary(serial_data)
-    st.sidebar.info("Using consolidated serial datasets for primary charting.")
-elif not primary_dfs:
-    st.sidebar.info("Upload primary probe or consolidated serial CSV files to begin.")
-    st.stop()
-serial_label_state_keys = {}
-serial_overlay_data = serial_data if not using_serial_as_primary else {}
-
-if serial_overlay_data:
-    st.sidebar.caption("Serial number datasets")
-    for option_key, info in serial_overlay_data.items():
-        state_key = _state_key("serial_label", str(option_key))
-        serial_label_state_keys[option_key] = state_key
-        st.session_state.setdefault(state_key, info['default_label'])
-        st.sidebar.text_input(
-            f"Legend label for {info['option_label']}",
-            key=state_key
+    serial_groups: Dict[str, Dict[str, object]] = {}
+    for key, info in serial_data.items():
+        df = info.get('df') if isinstance(info, dict) else None
+        if df is None:
+            continue
+        serial_value = str(info.get('serial') or '').strip()
+        group_key = serial_value or str(key)
+        group = serial_groups.setdefault(
+            group_key,
+            {
+                'dfs': [],
+                'range_maps': [],
+                'option_labels': [],
+                'default_labels': [],
+                'source_names': [],
+                'serial': serial_value,
+            },
         )
-elif not serial_data:
-    st.sidebar.info("Upload consolidated serial CSV files to overlay serial data.")
+        group['dfs'].append(df)
+        range_map = info.get('range_map') if isinstance(info, dict) else None
+        if isinstance(range_map, dict):
+            group['range_maps'].append(range_map)
+        option_label = info.get('option_label') if isinstance(info, dict) else None
+        if option_label:
+            group['option_labels'].append(option_label)
+        default_label = info.get('default_label') if isinstance(info, dict) else None
+        if default_label:
+            group['default_labels'].append(default_label)
+        source_name = info.get('source_name') if isinstance(info, dict) else None
+        if source_name:
+            group['source_names'].append(source_name)
+
+    primary_dfs: Dict[str, pd.DataFrame] = {}
+    primary_ranges: Dict[str, Dict[str, Tuple[float, float]]] = {}
+    metadata: Dict[str, Dict[str, object]] = {}
+
+    for group_key, group in serial_groups.items():
+        dfs: List[pd.DataFrame] = group.get('dfs', [])  # type: ignore[assignment]
+        if not dfs:
+            continue
+        combined = pd.concat(dfs, ignore_index=True)
+        if 'DateTime' in combined.columns:
+            combined = combined.sort_values('DateTime')
+        if 'Date' in combined.columns:
+            combined['Date'] = pd.to_datetime(combined['Date'], errors='coerce')
+        combined = combined.reset_index(drop=True)
+
+        range_map: Dict[str, Tuple[float, float]] = {}
+        for rm in group.get('range_maps', []):  # type: ignore[assignment]
+            range_map.update(rm)
+
+        channel_candidates = [
+            col
+            for col in combined.columns
+            if col not in {'Date', 'Time', 'DateTime'}
+        ]
+
+        descriptor = next(
+            (label for label in group.get('option_labels', []) if label),
+            '',
+        )
+        if not descriptor:
+            descriptor = next(
+                (label for label in group.get('default_labels', []) if label),
+                '',
+            )
+
+        serial_value = group.get('serial') or ''
+        tab_label = ''
+        if serial_value and descriptor and serial_value not in descriptor:
+            tab_label = f"{serial_value} – {descriptor}"
+        elif serial_value:
+            tab_label = str(serial_value)
+        elif descriptor:
+            tab_label = descriptor
+        else:
+            tab_label = group_key
+
+        legend_default = descriptor or serial_value or tab_label
+        source_names = sorted({name for name in group.get('source_names', []) if name})
+
+        metadata[group_key] = {
+            'serial': serial_value,
+            'tab_label': tab_label,
+            'legend_default': legend_default,
+            'descriptor': descriptor,
+            'source_label': ', '.join(source_names),
+            'channels': channel_candidates,
+        }
+
+        primary_dfs[group_key] = combined
+        primary_ranges[group_key] = range_map
+
+    return primary_dfs, primary_ranges, metadata
+
+serial_data = parse_serial_csv(serial_files)
+if not serial_data:
+    st.sidebar.info("Upload consolidated serial CSV files to begin.")
+    st.stop()
+
+primary_dfs, primary_ranges, serial_metadata = _prepare_serial_primary(serial_data)
+if not primary_dfs:
+    st.sidebar.info("No valid serial data found in the uploaded files.")
+    st.stop()
+
+probe_dfs, _ = _parse_probe_files(probe_files)
+probe_labels: Dict[str, str] = {}
+if probe_dfs:
+    st.sidebar.caption("Probe datasets")
+    for probe_name in probe_dfs:
+        label_key = _state_key("probe_label", probe_name)
+        default_label = Path(probe_name).stem
+        st.session_state.setdefault(label_key, default_label)
+        value = st.sidebar.text_input(
+            f"Legend label for {probe_name}",
+            key=label_key
+        )
+        probe_labels[probe_name] = value.strip() if isinstance(value, str) and value.strip() else default_label
+
+def _serial_sort_key(item: Tuple[str, Dict[str, object]]) -> Tuple[str, str]:
+    key, meta = item
+    serial_value = str(meta.get('serial') or '').strip()
+    tab_label = str(meta.get('tab_label') or key)
+    primary_value = serial_value or tab_label
+    return (primary_value.lower(), tab_label.lower())
 
 
-def _format_primary_option(name: str) -> str:
-    path = Path(name)
-    if path.suffix:
-        return path.stem
-    return name
+serial_keys = [key for key, _ in sorted(serial_metadata.items(), key=_serial_sort_key)]
+
+probe_assignments: Dict[str, List[str]] = {}
+serial_options = serial_keys
 
 
-serial_assignments = {}
-if serial_overlay_data:
-    st.sidebar.markdown("### Serial Assignments")
-    primary_options = list(primary_dfs.keys())
-    for serial_key, info in serial_overlay_data.items():
-        assign_key = _state_key("serial_assignment", str(serial_key))
-        existing = st.session_state.get(assign_key)
-        if existing is None and primary_options:
-            default_assignment = [primary_options[0]]
-            st.session_state[assign_key] = default_assignment
-            existing = default_assignment
-        if existing is None:
-            existing = []
-        valid_existing = [opt for opt in existing if opt in primary_options]
-        if not valid_existing and primary_options:
-            valid_existing = [primary_options[0]]
-        if existing != valid_existing:
-            st.session_state[assign_key] = valid_existing
-        serial_assignments[serial_key] = st.sidebar.multiselect(
-            f"Assign to {info['option_label']}",
-            options=primary_options,
-            format_func=_format_primary_option,
+def _format_serial_option(option: str) -> str:
+    meta = serial_metadata.get(option, {})
+    serial_value = meta.get('serial')
+    descriptor = meta.get('descriptor')
+    tab_label = meta.get('tab_label')
+    if serial_value and descriptor and serial_value not in descriptor:
+        return f"{serial_value} – {descriptor}"
+    return tab_label or option
+
+
+if probe_dfs and serial_options:
+    st.sidebar.markdown("### Probe Assignments")
+    for probe_name in probe_dfs:
+        assign_key = _state_key("probe_assignment", probe_name)
+        if assign_key in st.session_state:
+            existing = [
+                opt for opt in st.session_state[assign_key] if opt in serial_options
+            ]
+            if existing != st.session_state[assign_key]:
+                st.session_state[assign_key] = existing
+        else:
+            st.session_state[assign_key] = []
+        probe_assignments[probe_name] = st.sidebar.multiselect(
+            f"Assign {probe_name}",
+            options=serial_options,
+            format_func=_format_serial_option,
             key=assign_key,
         )
-
 # Year & Month selection
 years = sorted({dt.year for df in primary_dfs.values() for dt in df['Date'].dropna()})
 months = sorted({dt.month for df in primary_dfs.values() for dt in df['Date'].dropna()})
+if not years or not months:
+    st.sidebar.warning("No valid timestamp data found in the uploaded serial files.")
+    st.stop()
 year = st.sidebar.selectbox("Year", years)
 month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
 
-for name in primary_dfs:
-    st.session_state.setdefault(f"chart_title_{name}", Path(name).stem)
-    st.session_state.setdefault(f"primary_label_{name}", "Probe")
+for name in serial_keys:
+    meta = serial_metadata.get(name, {})
+    default_title = meta.get('tab_label') or str(name)
+    chart_key = f"chart_title_{name}"
+    if chart_key not in st.session_state:
+        st.session_state[chart_key] = default_title
+    primary_label_key = f"primary_label_{name}"
+    default_primary_label = meta.get('legend_default') or default_title or "Serial Data"
+    if primary_label_key not in st.session_state or st.session_state[primary_label_key] in {"", "Probe"}:
+        st.session_state[primary_label_key] = default_primary_label
     st.session_state.setdefault(f"materials_{name}", "")
     st.session_state.setdefault(f"probe_{name}", "")
     st.session_state.setdefault(f"equip_{name}", "")
@@ -374,12 +493,16 @@ def _build_outputs(
     return result
 
 
-tab_titles = [Path(name).stem for name in primary_dfs]
+tab_titles = [serial_metadata[name].get('tab_label') or str(name) for name in serial_keys]
 tabs = st.tabs(tab_titles)
-for tab, name in zip(tabs, primary_dfs):
+for tab, name in zip(tabs, serial_keys):
     with tab:
         df = primary_dfs[name]
-        st.subheader(name)
+        meta = serial_metadata.get(name, {})
+        st.subheader(meta.get('tab_label') or str(name))
+        source_label = meta.get('source_label')
+        if source_label:
+            st.caption(f"Source: {source_label}")
 
         st.markdown("### Chart Details")
         chart_title_key = f"chart_title_{name}"
@@ -391,13 +514,33 @@ for tab, name in zip(tabs, primary_dfs):
         equip_id_key = f"equip_{name}"
         equip_id = st.text_input("Equipment ID", key=equip_id_key)
 
-        st.markdown("### Data Uploads")
-        secondary_files = st.file_uploader(
-            "Upload Secondary Probe CSV files (optional)",
-            accept_multiple_files=True,
-            key=f"secondary_{name}"
-        )
-        secondary_dfs, _ = _parse_probe_files(secondary_files)
+        st.markdown("### Optional Overlays")
+        assigned_probes = [
+            probe_name
+            for probe_name, assigned in probe_assignments.items()
+            if name in assigned
+        ]
+        selected_probe_overlays: List[str] = []
+        probe_selection_key = f"probe_select_{name}"
+        if assigned_probes:
+            if probe_selection_key in st.session_state:
+                current = [
+                    opt for opt in st.session_state[probe_selection_key]
+                    if opt in assigned_probes
+                ]
+                st.session_state[probe_selection_key] = current
+            selected_probe_overlays = st.multiselect(
+                "Assigned probe overlays",
+                options=assigned_probes,
+                default=assigned_probes,
+                format_func=lambda opt: probe_labels.get(opt, Path(opt).stem),
+                key=probe_selection_key,
+            )
+        elif probe_dfs:
+            st.info("Assign probe datasets in the sidebar to overlay them with this serial.")
+        else:
+            st.caption("No probe datasets uploaded.")
+
         tempstick_files = st.file_uploader(
             "Upload Tempstick CSV files (optional)",
             accept_multiple_files=True,
@@ -405,81 +548,7 @@ for tab, name in zip(tabs, primary_dfs):
         )
         tempdfs = _parse_tempstick_files(tempstick_files)
 
-        def _format_serial_option(opt):
-            state_key = serial_label_state_keys.get(opt)
-            if state_key:
-                value = st.session_state.get(state_key)
-                if value:
-                    return value
-            info = serial_overlay_data.get(opt) if serial_overlay_data else None
-            if info:
-                return info['option_label']
-            return opt
-
-        assigned_serials = []
-        if serial_overlay_data:
-            for serial_key, assigned in serial_assignments.items():
-                if name in assigned:
-                    assigned_serials.append(serial_key)
-
-        serial_selection_key = f"serial_select_{name}"
-        serial_options = list(serial_overlay_data.keys()) if serial_overlay_data else []
-        current_selection = [
-            opt for opt in st.session_state.get(serial_selection_key, [])
-            if opt in serial_options
-        ]
-        for opt in assigned_serials:
-            if opt not in current_selection:
-                current_selection.append(opt)
-        if serial_options:
-            st.session_state[serial_selection_key] = current_selection
-            serial_selection = st.multiselect(
-                "Assign serial overlays",
-                options=serial_options,
-                format_func=_format_serial_option,
-                key=serial_selection_key,
-            )
-        else:
-            serial_selection = []
-
-        selected_serial_overlays = []
-        for opt in serial_selection:
-            info = serial_overlay_data.get(opt)
-            if not info:
-                continue
-            state_key = serial_label_state_keys.get(opt)
-            legend_label = (
-                st.session_state.get(state_key)
-                if state_key and st.session_state.get(state_key)
-                else info['default_label']
-            )
-            selected_serial_overlays.append(
-                {
-                    'df': info['df'],
-                    'label': legend_label,
-                }
-            )
-
-        st.markdown("### Legend Labels")
-        primary_label_key = f"primary_label_{name}"
-        st.text_input("Legend label for primary data", key=primary_label_key)
-        all_primary_labels = {
-            fname: (st.session_state.get(f"primary_label_{fname}") or "Probe")
-            for fname in primary_dfs
-        }
-
-        secondary_labels = {}
-        if secondary_dfs:
-            st.caption("Secondary probe files")
-            for sec_name in secondary_dfs:
-                key = f"label_secondary_{name}_{sec_name}"
-                st.session_state.setdefault(key, sec_name)
-                secondary_labels[sec_name] = st.text_input(
-                    f"Label for {sec_name}",
-                    key=key
-                )
-
-        tempstick_labels = {}
+        tempstick_labels: Dict[str, str] = {}
         if tempdfs:
             st.caption("Tempstick files")
             for ts_name in tempdfs:
@@ -501,36 +570,45 @@ for tab, name in zip(tabs, primary_dfs):
             else []
         )
 
-        comparison_options = {}
-        for other_name in primary_dfs:
-            if other_name == name:
-                continue
-            comparison_options[f"primary::{other_name}"] = ("primary", other_name)
-        for sec_name in secondary_dfs:
-            comparison_options[f"secondary::{sec_name}"] = ("secondary", sec_name)
+        st.markdown("### Legend Labels")
+        primary_label_key = f"primary_label_{name}"
+        st.text_input("Legend label for serial data", key=primary_label_key)
+        all_primary_labels = {
+            fname: (
+                st.session_state.get(f"primary_label_{fname}")
+                or serial_metadata.get(fname, {}).get('legend_default')
+                or str(fname)
+            )
+            for fname in serial_keys
+        }
 
-        def _format_option(opt_key):
-            source, fname = comparison_options[opt_key]
-            if source == "primary":
-                return all_primary_labels.get(fname, fname)
-            label = secondary_labels.get(fname, fname)
-            return f"{label} (Secondary)"
+        secondary_labels = {
+            sec_name: probe_labels.get(sec_name, Path(sec_name).stem)
+            for sec_name in probe_dfs
+        }
 
-        format_func = _format_option if comparison_options else None
-        comparison_probes = st.multiselect(
-            "Additional probe files to overlay",
-            options=list(comparison_options.keys()),
-            format_func=format_func,
-            key=f"compare_{name}"
-        )
+        comparison_options = {
+            f"secondary::{sec_name}": ("secondary", sec_name)
+            for sec_name in selected_probe_overlays
+        }
+        comparison_probes = list(comparison_options.keys())
 
-        channel_keys = list(primary_ranges[name].keys())
+        channel_defaults = list(primary_ranges.get(name, {}).keys())
+        if not channel_defaults:
+            channel_defaults = [
+                col
+                for col in df.columns
+                if col not in {'Date', 'Time', 'DateTime'}
+                and pd.api.types.is_numeric_dtype(df[col])
+            ]
         channels = st.multiselect(
             "Channels to plot",
-            options=channel_keys,
-            default=channel_keys,
+            options=channel_defaults,
+            default=channel_defaults,
             key=f"channels_{name}"
         )
+
+        selected_serial_overlays: List[Dict[str, object]] = []
 
         generate_clicked = st.button(f"Generate {name}", key=f"btn_{name}")
         if generate_clicked:
@@ -548,7 +626,7 @@ for tab, name in zip(tabs, primary_dfs):
                 comparison_probes,
                 comparison_options,
                 primary_dfs,
-                secondary_dfs,
+                probe_dfs,
                 all_primary_labels,
                 secondary_labels,
                 tempdfs,
