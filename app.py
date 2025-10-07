@@ -1,4 +1,5 @@
 import copy
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -8,7 +9,7 @@ import calendar
 import altair as alt
 from datetime import datetime, timedelta
 
-from data_processing import _parse_probe_files, _parse_tempstick_files
+from data_processing import _parse_probe_files, _parse_tempstick_files, parse_serial_csv
 
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="⛅")
@@ -45,6 +46,11 @@ def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]
     if 'hum' in ch_lower and 'Humidity' in ts_df.columns:
         return 'Humidity'
     return None
+
+
+def _state_key(prefix: str, identifier: str) -> str:
+    digest = hashlib.sha1(identifier.encode('utf-8')).hexdigest()[:10]
+    return f"{prefix}_{digest}"
 
 primary_dfs, primary_ranges = _parse_probe_files(primary_probe_files)
 if not primary_dfs:
@@ -88,6 +94,7 @@ def _build_outputs(
     materials,
     probe_id,
     equip_id,
+    serial_overlays,
 ):
     base_title = chart_title or Path(name).stem
     period_label = f"{calendar.month_name[month]} {year}"
@@ -130,6 +137,7 @@ def _build_outputs(
         series_frames = []
         probe_legends = []
         tempstick_legends = []
+        serial_legends = []
 
         probe_label = probe_labels.get(name, "Probe")
         probe_sub = sel[['DateTime', ch]].rename(columns={ch: 'Value'})
@@ -176,6 +184,22 @@ def _build_outputs(
             series_frames.append(ts_sub)
             tempstick_legends.append(ts_label)
 
+        for overlay in serial_overlays:
+            overlay_df = overlay.get('df')
+            if overlay_df is None or ch not in overlay_df.columns:
+                continue
+            overlay_filtered = overlay_df[
+                (overlay_df['DateTime'].dt.year == year)
+                & (overlay_df['DateTime'].dt.month == month)
+            ].copy()
+            if overlay_filtered.empty or ch not in overlay_filtered.columns:
+                continue
+            overlay_label = overlay.get('label') or 'Serial'
+            overlay_sub = overlay_filtered[['DateTime', ch]].rename(columns={ch: 'Value'})
+            overlay_sub['Legend'] = overlay_label
+            series_frames.append(overlay_sub)
+            serial_legends.append(overlay_label)
+
         if not series_frames:
             channel_info["warning"] = f"No data available to chart for channel {ch}."
             result["channel_results"][ch] = channel_info
@@ -196,13 +220,16 @@ def _build_outputs(
         ymin, ymax = raw_min - pad, raw_max + pad
         probe_palette = ['#1f77b4', '#9467bd', '#17becf', '#7f7f7f']
         tempstick_palette = ['#ff7f0e', '#bcbd22', '#8c564b', '#e377c2']
+        serial_palette = ['#ff9896', '#98df8a', '#c5b0d5', '#c49c94']
         color_map = {}
         for idx, legend in enumerate(probe_legends):
             color_map[legend] = probe_palette[idx % len(probe_palette)]
         for idx, legend in enumerate(tempstick_legends):
             color_map[legend] = tempstick_palette[idx % len(tempstick_palette)]
+        for idx, legend in enumerate(serial_legends):
+            color_map[legend] = serial_palette[idx % len(serial_palette)]
         color_map.update({'Lower Limit': '#2ca02c', 'Upper Limit': '#d62728'})
-        legend_entries = probe_legends + tempstick_legends
+        legend_entries = probe_legends + tempstick_legends + serial_legends
         has_limits = ch in primary_ranges[name]
         if has_limits:
             legend_entries.extend(['Lower Limit', 'Upper Limit'])
@@ -302,6 +329,64 @@ for tab, name in zip(tabs, primary_dfs):
         )
         tempdfs = _parse_tempstick_files(tempstick_files)
 
+        serial_files = st.file_uploader(
+            "Upload Consolidated Serial CSV files (optional)",
+            accept_multiple_files=True,
+            key=f"serial_{name}"
+        )
+        serial_data = parse_serial_csv(serial_files)
+        serial_label_state_keys = {}
+        if serial_data:
+            st.caption("Serial number datasets")
+            for option_key, info in serial_data.items():
+                state_key = _state_key(f"serial_label_{name}", str(option_key))
+                serial_label_state_keys[option_key] = state_key
+                st.session_state.setdefault(state_key, info['default_label'])
+                st.text_input(
+                    f"Legend label for {info['option_label']}",
+                    key=state_key
+                )
+
+        def _format_serial_option(opt):
+            state_key = serial_label_state_keys.get(opt)
+            if state_key:
+                value = st.session_state.get(state_key)
+                if value:
+                    return value
+            info = serial_data.get(opt) if serial_data else None
+            if info:
+                return info['option_label']
+            return opt
+
+        serial_selection = (
+            st.multiselect(
+                "Assign serial overlays",
+                options=list(serial_data.keys()),
+                format_func=_format_serial_option,
+                key=f"serial_select_{name}"
+            )
+            if serial_data
+            else []
+        )
+
+        selected_serial_overlays = []
+        for opt in serial_selection:
+            info = serial_data.get(opt)
+            if not info:
+                continue
+            state_key = serial_label_state_keys.get(opt)
+            legend_label = (
+                st.session_state.get(state_key)
+                if state_key and st.session_state.get(state_key)
+                else info['default_label']
+            )
+            selected_serial_overlays.append(
+                {
+                    'df': info['df'],
+                    'label': legend_label,
+                }
+            )
+
         st.markdown("### Legend Labels")
         primary_label_key = f"primary_label_{name}"
         st.text_input("Legend label for primary data", key=primary_label_key)
@@ -400,6 +485,7 @@ for tab, name in zip(tabs, primary_dfs):
                 materials_value,
                 probe_id_value,
                 equip_id_value,
+                selected_serial_overlays,
             )
             st.session_state["generated_results"][name] = result
 

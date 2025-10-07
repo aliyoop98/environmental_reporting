@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from data_processing import _parse_probe_files
+from data_processing import _parse_probe_files, parse_serial_csv
 
 
 class InMemoryFile(io.BytesIO):
@@ -111,3 +111,30 @@ def test_parse_consolidated_probe_file_with_serial_num_alias():
     assert list(df_alias.columns) == ["Date", "Time", "DateTime", "Humidity"]
     assert not df_alias.empty
     assert ranges[key]["Humidity"] == (0, 60)
+
+
+def test_parse_serial_csv_extracts_unique_serials():
+    csv_text = "\n".join(
+        [
+            "Timestamp,Serial Number,Channel,Data,Unit of Measure,Space Name",
+            "2024-02-01 00:00:00,SN-A,Temperature,4.5,°C,Chamber 1",
+            "2024-02-01 00:05:00,SN-A,Humidity,55,% ,Chamber 1",
+            "2024-02-01 00:00:00,SN-B,Temperature,3.2,°C,Chamber 2",
+            "",
+        ]
+    )
+    file_obj = InMemoryFile(csv_text, "serials.csv")
+
+    serials = parse_serial_csv([file_obj])
+
+    key_a = "serials.csv - Chamber 1 [SN-A]"
+    key_b = "serials.csv - Chamber 2 [SN-B]"
+
+    assert key_a in serials
+    assert key_b in serials
+
+    info_a = serials[key_a]
+    df_a = info_a['df']
+    assert list(df_a.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
+    assert info_a['serial'] == "SN-A"
+    assert info_a['default_label'] in {"Chamber 1", "SN-A"}

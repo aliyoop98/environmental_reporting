@@ -1,5 +1,6 @@
 import io
-from typing import Optional, Tuple, Dict, Iterable, Mapping
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Iterable, Mapping, List
 
 import pandas as pd
 
@@ -195,6 +196,141 @@ def _clean_metadata_series(series: pd.Series) -> pd.Series:
     return pd.Series(normalized, index=series.index)
 
 
+def _process_new_schema_df(
+    df_full: pd.DataFrame,
+    name: str,
+    default_temp_range: Tuple[float, float],
+    default_humidity_range: Tuple[float, float],
+) -> List[Dict[str, object]]:
+    canonical_map = _match_new_schema_columns(df_full.columns)
+    if not canonical_map:
+        return []
+
+    strip_map = {
+        col: col.strip()
+        for col in df_full.columns
+        if isinstance(col, str)
+    }
+    df_new = df_full.rename(columns=strip_map)
+    canonical = {
+        strip_map.get(original, original): canonical_name
+        for original, canonical_name in canonical_map.items()
+    }
+    df_new = df_new.rename(columns=canonical)
+    df_new['Timestamp'] = pd.to_datetime(
+        df_new['Timestamp'], errors='coerce'
+    )
+    df_new['Serial Number'] = (
+        df_new['Serial Number'].astype(str).str.strip()
+    )
+    df_new['Channel'] = df_new['Channel'].astype(str)
+    df_new['Unit of Measure'] = df_new['Unit of Measure'].astype(str)
+    df_new = df_new.dropna(subset=['Timestamp', 'Serial Number'])
+    df_new['Data'] = pd.to_numeric(df_new['Data'], errors='coerce')
+    if df_new.empty:
+        return []
+
+    space_name_col = _find_column_by_terms(df_new.columns, _SPACE_NAME_HINTS)
+    space_type_col = _find_column_by_terms(df_new.columns, _SPACE_TYPE_HINTS)
+    if space_name_col:
+        df_new['_SpaceName'] = _clean_metadata_series(df_new[space_name_col])
+    else:
+        df_new['_SpaceName'] = ''
+    if space_type_col:
+        df_new['_SpaceType'] = _clean_metadata_series(df_new[space_type_col])
+    else:
+        df_new['_SpaceType'] = ''
+
+    group_columns = ['Serial Number']
+    if space_name_col:
+        group_columns.append('_SpaceName')
+    if space_type_col:
+        group_columns.append('_SpaceType')
+
+    results: List[Dict[str, object]] = []
+    for keys, sdf in df_new.groupby(group_columns):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        key_map = dict(zip(group_columns, keys))
+        serial = str(key_map.get('Serial Number', '')).strip()
+        space_name = str(key_map.get('_SpaceName', '')).strip()
+        space_type = str(key_map.get('_SpaceType', '')).strip()
+        sdf = sdf.copy()
+        sdf['Measurement'] = sdf.apply(
+            lambda row: _classify_measurement(
+                row.get('Channel'), row.get('Unit of Measure')
+            ),
+            axis=1,
+        )
+        sdf = sdf.dropna(subset=['Measurement'])
+        if sdf.empty:
+            continue
+        sdf = sdf.sort_values('Timestamp')
+        pivot = sdf.pivot_table(
+            index='Timestamp',
+            columns='Measurement',
+            values='Data',
+            aggfunc='last',
+        )
+        if pivot.empty:
+            continue
+        pivot = pivot.rename_axis(None, axis=1).sort_index()
+        pivot['DateTime'] = pivot.index
+        pivot['Date'] = pivot['DateTime'].dt.date
+        pivot['Time'] = pivot['DateTime'].dt.strftime('%H:%M:%S')
+        ordered_cols = ['Date', 'Time', 'DateTime']
+        for col in ['Temperature', 'Humidity']:
+            if col in pivot.columns:
+                ordered_cols.append(col)
+        pivot = pivot[ordered_cols].reset_index(drop=True)
+        display_name = ''
+        if space_name and space_type:
+            display_name = f"{space_name} ({space_type})"
+        elif space_name:
+            display_name = space_name
+        elif space_type:
+            display_name = space_type
+
+        label_prefix = name if not display_name else f"{name} - {display_name}"
+        label = f"{label_prefix} [{serial}]" if serial else label_prefix
+
+        range_map: Dict[str, Tuple[float, float]] = {}
+        channels: List[str] = []
+        if 'Temperature' in ordered_cols:
+            range_map['Temperature'] = default_temp_range
+            channels.append('Temperature')
+        if 'Humidity' in ordered_cols:
+            range_map['Humidity'] = default_humidity_range
+            channels.append('Humidity')
+
+        default_label = display_name or serial or Path(name).stem
+        option_label = ''
+        if serial and display_name:
+            option_label = f"{serial} – {display_name}"
+        elif serial:
+            option_label = serial
+        elif display_name:
+            option_label = display_name
+        else:
+            option_label = label
+
+        results.append(
+            {
+                'key': label,
+                'df': pivot,
+                'range_map': range_map,
+                'serial': serial,
+                'display_name': display_name,
+                'default_label': default_label,
+                'option_label': option_label,
+                'source_name': name,
+                'channels': channels,
+            }
+        )
+
+    return results
+
+
 def _parse_probe_files(files):
     dfs = {}
     ranges: Dict[str, Dict[str, Tuple[float, float]]] = {}
@@ -209,100 +345,16 @@ def _parse_probe_files(files):
         full_content = ''.join(raw)
         df_full = _read_csv_flexible(full_content)
         if df_full is not None:
-            canonical_map = _match_new_schema_columns(df_full.columns)
-            if canonical_map:
-                strip_map = {
-                    col: col.strip()
-                    for col in df_full.columns
-                    if isinstance(col, str)
-                }
-                df_new = df_full.rename(columns=strip_map)
-                canonical = {
-                    strip_map.get(original, original): canonical_name
-                    for original, canonical_name in canonical_map.items()
-                }
-                df_new = df_new.rename(columns=canonical)
-                df_new['Timestamp'] = pd.to_datetime(
-                    df_new['Timestamp'], errors='coerce'
-                )
-                df_new['Serial Number'] = (
-                    df_new['Serial Number'].astype(str).str.strip()
-                )
-                df_new['Channel'] = df_new['Channel'].astype(str)
-                df_new['Unit of Measure'] = df_new['Unit of Measure'].astype(str)
-                df_new = df_new.dropna(subset=['Timestamp', 'Serial Number'])
-                df_new['Data'] = pd.to_numeric(df_new['Data'], errors='coerce')
-                if df_new.empty:
-                    continue
-                space_name_col = _find_column_by_terms(df_new.columns, _SPACE_NAME_HINTS)
-                space_type_col = _find_column_by_terms(df_new.columns, _SPACE_TYPE_HINTS)
-                if space_name_col:
-                    df_new['_SpaceName'] = _clean_metadata_series(df_new[space_name_col])
-                else:
-                    df_new['_SpaceName'] = ''
-                if space_type_col:
-                    df_new['_SpaceType'] = _clean_metadata_series(df_new[space_type_col])
-                else:
-                    df_new['_SpaceType'] = ''
-
-                group_columns = ['Serial Number']
-                if space_name_col:
-                    group_columns.append('_SpaceName')
-                if space_type_col:
-                    group_columns.append('_SpaceType')
-
-                for keys, sdf in df_new.groupby(group_columns):
-                    if not isinstance(keys, tuple):
-                        keys = (keys,)
-                    key_map = dict(zip(group_columns, keys))
-                    serial = str(key_map.get('Serial Number', '')).strip()
-                    space_name = str(key_map.get('_SpaceName', '')).strip()
-                    space_type = str(key_map.get('_SpaceType', '')).strip()
-                    sdf = sdf.copy()
-                    sdf['Measurement'] = sdf.apply(
-                        lambda row: _classify_measurement(
-                            row.get('Channel'), row.get('Unit of Measure')
-                        ),
-                        axis=1,
-                    )
-                    sdf = sdf.dropna(subset=['Measurement'])
-                    if sdf.empty:
-                        continue
-                    sdf = sdf.sort_values('Timestamp')
-                    pivot = sdf.pivot_table(
-                        index='Timestamp',
-                        columns='Measurement',
-                        values='Data',
-                        aggfunc='last',
-                    )
-                    if pivot.empty:
-                        continue
-                    pivot = pivot.rename_axis(None, axis=1).sort_index()
-                    pivot['DateTime'] = pivot.index
-                    pivot['Date'] = pivot['DateTime'].dt.date
-                    pivot['Time'] = pivot['DateTime'].dt.strftime('%H:%M:%S')
-                    ordered_cols = ['Date', 'Time', 'DateTime']
-                    for col in ['Temperature', 'Humidity']:
-                        if col in pivot.columns:
-                            ordered_cols.append(col)
-                    pivot = pivot[ordered_cols].reset_index(drop=True)
-                    display_name = ''
-                    if space_name and space_type:
-                        display_name = f"{space_name} ({space_type})"
-                    elif space_name:
-                        display_name = space_name
-                    elif space_type:
-                        display_name = space_type
-                    label_prefix = name if not display_name else f"{name} - {display_name}"
-                    label = f"{label_prefix} [{serial}]" if serial else label_prefix
-                    dfs[label] = pivot
-                    range_map = {}
-                    if 'Temperature' in ordered_cols:
-                        range_map['Temperature'] = default_temp_range
-                    if 'Humidity' in ordered_cols:
-                        range_map['Humidity'] = default_humidity_range
+            new_schema_groups = _process_new_schema_df(
+                df_full, name, default_temp_range, default_humidity_range
+            )
+            if new_schema_groups:
+                for group in new_schema_groups:
+                    key = group['key']  # type: ignore[index]
+                    dfs[key] = group['df']  # type: ignore[index]
+                    range_map = group['range_map']  # type: ignore[index]
                     if range_map:
-                        ranges[label] = range_map
+                        ranges[key] = range_map
                 continue
         try:
             idx = max(i for i, line in enumerate(raw) if 'ch1' in line.lower() or 'p1' in line.lower())
@@ -350,6 +402,36 @@ def _parse_probe_files(files):
             df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
         dfs[name] = df.reset_index(drop=True)
     return dfs, ranges
+
+
+def parse_serial_csv(files):
+    serials: Dict[str, Dict[str, object]] = {}
+    if not files:
+        return serials
+    default_temp_range = DEFAULT_TEMP_RANGE
+    default_humidity_range = DEFAULT_HUMIDITY_RANGE
+    for f in files:
+        f.seek(0)
+        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
+        full_content = ''.join(raw)
+        df_full = _read_csv_flexible(full_content)
+        if df_full is None:
+            continue
+        groups = _process_new_schema_df(
+            df_full, f.name, default_temp_range, default_humidity_range
+        )
+        for group in groups:
+            key = group['key']  # type: ignore[index]
+            serials[key] = {
+                'df': group['df'],  # type: ignore[index]
+                'range_map': group['range_map'],  # type: ignore[index]
+                'serial': group['serial'],  # type: ignore[index]
+                'default_label': group['default_label'],  # type: ignore[index]
+                'option_label': group['option_label'],  # type: ignore[index]
+                'source_name': group['source_name'],  # type: ignore[index]
+                'channels': group['channels'],  # type: ignore[index]
+            }
+    return serials
 
 
 def _parse_tempstick_files(files):
