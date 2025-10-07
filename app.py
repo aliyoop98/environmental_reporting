@@ -1,6 +1,7 @@
 import copy
 import hashlib
 from pathlib import Path
+import sys
 from typing import Optional
 
 import streamlit as st
@@ -8,6 +9,11 @@ import pandas as pd
 import calendar
 import altair as alt
 from datetime import datetime, timedelta
+
+# Ensure local imports resolve even when the repository root is not on PYTHONPATH.
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 from data_processing import _parse_probe_files, _parse_tempstick_files, parse_serial_csv
 
