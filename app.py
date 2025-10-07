@@ -186,6 +186,29 @@ if not primary_dfs:
     st.sidebar.info("No valid serial data found in the uploaded files.")
     st.stop()
 
+
+def _collect_years_months(dataframes: Dict[str, pd.DataFrame]) -> Tuple[List[int], List[int]]:
+    """Return sorted lists of distinct years and months from uploaded data."""
+
+    years: set[int] = set()
+    months: set[int] = set()
+
+    for df in dataframes.values():
+        date_series = pd.Series(dtype="datetime64[ns]")
+        if "Date" in df.columns:
+            date_series = pd.to_datetime(df["Date"], errors="coerce")
+        elif "DateTime" in df.columns:
+            date_series = pd.to_datetime(df["DateTime"], errors="coerce")
+
+        valid = date_series.dropna()
+        if valid.empty:
+            continue
+
+        years.update(valid.dt.year.unique().tolist())
+        months.update(valid.dt.month.unique().tolist())
+
+    return sorted(years), sorted(months)
+
 probe_dfs, _ = _parse_probe_files(probe_files)
 probe_labels: Dict[str, str] = {}
 if probe_dfs:
@@ -209,6 +232,17 @@ def _serial_sort_key(item: Tuple[str, Dict[str, object]]) -> Tuple[str, str]:
 
 
 serial_keys = [key for key, _ in sorted(serial_metadata.items(), key=_serial_sort_key)]
+
+unique_serials = sorted(
+    {
+        str(meta.get('serial') or key).strip()
+        for key, meta in serial_metadata.items()
+        if str(meta.get('serial') or key).strip()
+    }
+)
+if unique_serials:
+    st.sidebar.markdown("### Serial Numbers Detected")
+    st.sidebar.markdown("\n".join(f"- {serial}" for serial in unique_serials))
 
 probe_assignments: Dict[str, List[str]] = {}
 serial_options = serial_keys
@@ -243,8 +277,7 @@ if probe_dfs and serial_options:
             key=assign_key,
         )
 # Year & Month selection
-years = sorted({dt.year for df in primary_dfs.values() for dt in df['Date'].dropna()})
-months = sorted({dt.month for df in primary_dfs.values() for dt in df['Date'].dropna()})
+years, months = _collect_years_months(primary_dfs)
 if not years or not months:
     st.sidebar.warning("No valid timestamp data found in the uploaded serial files.")
     st.stop()
