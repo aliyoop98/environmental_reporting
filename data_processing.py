@@ -1,14 +1,43 @@
 import io
-from typing import Optional, Tuple, Dict, Iterable
+from typing import Optional, Tuple, Dict, Iterable, Mapping
 
 import pandas as pd
 
-NEW_SCHEMA_COLUMNS = {
-    'timestamp',
-    'serial number',
-    'channel',
-    'data',
-    'unit of measure',
+NEW_SCHEMA_ALIASES: Mapping[str, Tuple[str, ...]] = {
+    'Timestamp': (
+        'timestamp',
+        'time stamp',
+        'date time',
+        'date/time',
+        'datetime',
+    ),
+    'Serial Number': (
+        'serial number',
+        'serial num',
+        'serial no',
+        'serial #',
+        'serial',
+        'serialnumber',
+        'serialno',
+    ),
+    'Channel': (
+        'channel',
+        'sensor channel',
+        'probe channel',
+        'sensor',
+    ),
+    'Data': (
+        'data',
+        'value',
+        'reading',
+    ),
+    'Unit of Measure': (
+        'unit of measure',
+        'unit',
+        'units',
+        'uom',
+        'measurement unit',
+    ),
 }
 
 _SPACE_NAME_HINTS: Tuple[Tuple[str, ...], ...] = (
@@ -50,11 +79,50 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
 
     for kwargs in ({"sep": None, "engine": "python"}, {}):
         try:
-            df = pd.read_csv(io.StringIO(text), on_bad_lines="skip", **kwargs)
+            df = pd.read_csv(
+                io.StringIO(text), on_bad_lines="skip", index_col=False, **kwargs
+            )
         except Exception:
             continue
         return df.rename(columns=lambda c: c.strip() if isinstance(c, str) else c)
     return None
+
+
+def _normalize_header(value: str) -> str:
+    """Return a normalized representation of a CSV header for matching."""
+
+    cleaned = value.strip().lower()
+    cleaned = cleaned.replace('#', ' number ')
+    cleaned = cleaned.replace('-', ' ')
+    cleaned = cleaned.replace('_', ' ')
+    cleaned = ' '.join(cleaned.split())
+    return cleaned
+
+
+def _match_new_schema_columns(columns: Iterable[str]) -> Optional[Dict[str, str]]:
+    """Return mapping of original headers to canonical names for the new schema."""
+
+    normalized = {
+        col: _normalize_header(col)
+        for col in columns
+        if isinstance(col, str)
+    }
+    matches: Dict[str, str] = {}
+    used: set[str] = set()
+    for canonical, aliases in NEW_SCHEMA_ALIASES.items():
+        match = next(
+            (
+                original
+                for original, norm in normalized.items()
+                if original not in used and norm in aliases
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        matches[match] = canonical
+        used.add(match)
+    return matches
 
 
 def _classify_measurement(channel: str, unit: str) -> Optional[str]:
@@ -106,37 +174,18 @@ def _parse_probe_files(files):
         full_content = ''.join(raw)
         df_full = _read_csv_flexible(full_content)
         if df_full is not None:
-            normalized = {
-                c.strip().lower()
-                for c in df_full.columns
-                if isinstance(c, str)
-            }
-            if NEW_SCHEMA_COLUMNS.issubset(normalized):
-                df_new = df_full.rename(
-                    columns={
-                        col: col.strip()
-                        for col in df_full.columns
-                        if isinstance(col, str)
-                    }
-                )
-                canonical = {}
-                for target in [
-                    'Timestamp',
-                    'Serial Number',
-                    'Channel',
-                    'Data',
-                    'Unit of Measure',
-                ]:
-                    source = next(
-                        (
-                            c
-                            for c in df_new.columns
-                            if c.strip().lower() == target.lower()
-                        ),
-                        None,
-                    )
-                    if source:
-                        canonical[source] = target
+            canonical_map = _match_new_schema_columns(df_full.columns)
+            if canonical_map:
+                strip_map = {
+                    col: col.strip()
+                    for col in df_full.columns
+                    if isinstance(col, str)
+                }
+                df_new = df_full.rename(columns=strip_map)
+                canonical = {
+                    strip_map.get(original, original): canonical_name
+                    for original, canonical_name in canonical_map.items()
+                }
                 df_new = df_new.rename(columns=canonical)
                 df_new['Timestamp'] = pd.to_datetime(
                     df_new['Timestamp'], errors='coerce'

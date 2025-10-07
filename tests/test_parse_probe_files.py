@@ -90,3 +90,24 @@ def test_parse_consolidated_probe_file_with_space_assignments():
 
     assert ranges[equipment_key]["Temperature"] == (15, 25)
     assert ranges[ambient_key]["Humidity"] == (0, 60)
+
+
+def test_parse_consolidated_probe_file_with_serial_num_alias():
+    csv_text = "\n".join(
+        [
+            "Timestamp,Serial Num,Channel,Data,Unit of Measure",
+            "2025-09-11 15:36,250269594,sensor1,67.2,%,",
+            "2025-09-11 15:41,250269594,sensor1,68.5,%,",
+            "",
+        ]
+    )
+    file_obj = InMemoryFile(csv_text, "alias.csv")
+
+    dfs, ranges = _parse_probe_files([file_obj])
+
+    key = "alias.csv [250269594]"
+    assert key in dfs
+    df_alias = dfs[key]
+    assert list(df_alias.columns) == ["Date", "Time", "DateTime", "Humidity"]
+    assert not df_alias.empty
+    assert ranges[key]["Humidity"] == (0, 60)
