@@ -10,12 +10,25 @@ import calendar
 import altair as alt
 from datetime import datetime, timedelta
 
-# Ensure local imports resolve even when the repository root is not on PYTHONPATH.
+# Ensure imports work whether the app is executed as a module (e.g. via
+# ``python -m environmental_reporting.app``) or as a script where the repository
+# directory might not already be on ``sys.path``.
 CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
 
-from data_processing import _parse_probe_files, _parse_tempstick_files, parse_serial_csv
+if __package__:
+    from .data_processing import (
+        _parse_probe_files,
+        _parse_tempstick_files,
+        parse_serial_csv,
+    )
+else:
+    if str(CURRENT_DIR) not in sys.path:
+        sys.path.insert(0, str(CURRENT_DIR))
+    from data_processing import (
+        _parse_probe_files,
+        _parse_tempstick_files,
+        parse_serial_csv,
+    )
 
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="⛅")
