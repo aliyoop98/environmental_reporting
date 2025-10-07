@@ -1,5 +1,5 @@
 import io
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Iterable
 
 import pandas as pd
 
@@ -10,6 +10,36 @@ NEW_SCHEMA_COLUMNS = {
     'data',
     'unit of measure',
 }
+
+_SPACE_NAME_HINTS: Tuple[Tuple[str, ...], ...] = (
+    ("assignment", "name"),
+    ("space", "name"),
+    ("location", "name"),
+    ("asset", "name"),
+    ("subject", "name"),
+    ("target", "name"),
+    ("environment", "name"),
+    ("area", "name"),
+    ("zone", "name"),
+    ("equipment", "name"),
+    ("ambient", "name"),
+    ("probe", "name"),
+)
+
+_SPACE_TYPE_HINTS: Tuple[Tuple[str, ...], ...] = (
+    ("assignment", "type"),
+    ("space", "type"),
+    ("location", "type"),
+    ("asset", "type"),
+    ("subject", "type"),
+    ("target", "type"),
+    ("environment", "type"),
+    ("area", "type"),
+    ("zone", "type"),
+    ("probe", "type"),
+    ("space", "category"),
+    ("environment", "category"),
+)
 
 DEFAULT_TEMP_RANGE: Tuple[float, float] = (15, 25)
 DEFAULT_HUMIDITY_RANGE: Tuple[float, float] = (0, 60)
@@ -37,6 +67,29 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
     if any(token in channel for token in ('hum', '%')) or '%' in unit or 'rh' in unit:
         return 'Humidity'
     return None
+
+
+def _find_column_by_terms(columns: Iterable[str], hints: Iterable[Tuple[str, ...]]) -> Optional[str]:
+    """Return the first column that matches any group of hint terms."""
+
+    for terms in hints:
+        for col in columns:
+            if not isinstance(col, str):
+                continue
+            lower = col.lower()
+            if all(term in lower for term in terms):
+                return col
+    return None
+
+
+def _clean_metadata_series(series: pd.Series) -> pd.Series:
+    """Normalize free-text metadata columns used for grouping."""
+
+    normalized = []
+    for value in series.astype(str).tolist():
+        text = value.strip()
+        normalized.append("" if text.lower() in {"", "nan", "none", "null"} else text)
+    return pd.Series(normalized, index=series.index)
 
 
 def _parse_probe_files(files):
@@ -84,7 +137,7 @@ def _parse_probe_files(files):
                     )
                     if source:
                         canonical[source] = target
-                df_new = df_new[list(canonical)].rename(columns=canonical)
+                df_new = df_new.rename(columns=canonical)
                 df_new['Timestamp'] = pd.to_datetime(
                     df_new['Timestamp'], errors='coerce'
                 )
@@ -97,7 +150,30 @@ def _parse_probe_files(files):
                 df_new['Data'] = pd.to_numeric(df_new['Data'], errors='coerce')
                 if df_new.empty:
                     continue
-                for serial, sdf in df_new.groupby('Serial Number'):
+                space_name_col = _find_column_by_terms(df_new.columns, _SPACE_NAME_HINTS)
+                space_type_col = _find_column_by_terms(df_new.columns, _SPACE_TYPE_HINTS)
+                if space_name_col:
+                    df_new['_SpaceName'] = _clean_metadata_series(df_new[space_name_col])
+                else:
+                    df_new['_SpaceName'] = ''
+                if space_type_col:
+                    df_new['_SpaceType'] = _clean_metadata_series(df_new[space_type_col])
+                else:
+                    df_new['_SpaceType'] = ''
+
+                group_columns = ['Serial Number']
+                if space_name_col:
+                    group_columns.append('_SpaceName')
+                if space_type_col:
+                    group_columns.append('_SpaceType')
+
+                for keys, sdf in df_new.groupby(group_columns):
+                    if not isinstance(keys, tuple):
+                        keys = (keys,)
+                    key_map = dict(zip(group_columns, keys))
+                    serial = str(key_map.get('Serial Number', '')).strip()
+                    space_name = str(key_map.get('_SpaceName', '')).strip()
+                    space_type = str(key_map.get('_SpaceType', '')).strip()
                     sdf = sdf.copy()
                     sdf['Measurement'] = sdf.apply(
                         lambda row: _classify_measurement(
@@ -126,7 +202,15 @@ def _parse_probe_files(files):
                         if col in pivot.columns:
                             ordered_cols.append(col)
                     pivot = pivot[ordered_cols].reset_index(drop=True)
-                    label = f"{name} [{serial}]"
+                    display_name = ''
+                    if space_name and space_type:
+                        display_name = f"{space_name} ({space_type})"
+                    elif space_name:
+                        display_name = space_name
+                    elif space_type:
+                        display_name = space_type
+                    label_prefix = name if not display_name else f"{name} - {display_name}"
+                    label = f"{label_prefix} [{serial}]" if serial else label_prefix
                     dfs[label] = pivot
                     range_map = {}
                     if 'Temperature' in ordered_cols:

@@ -59,3 +59,34 @@ def test_parse_consolidated_probe_file():
     assert df_serial["Humidity"].dtype.kind in {"f", "i"}
     assert ranges["consolidated.csv [SN-123]"]["Temperature"] == (15, 25)
     assert ranges["consolidated.csv [SN-123]"]["Humidity"] == (0, 60)
+
+
+def test_parse_consolidated_probe_file_with_space_assignments():
+    csv_text = "\n".join(
+        [
+            "Timestamp,Serial Number,Channel,Data,Unit of Measure,Space Type,Space Name",
+            "2024-01-01 12:00:00,EQ-001,Equipment Temperature,4.5,°C,Equipment,Freezer A",
+            "2024-01-01 12:05:00,EQ-001,Equipment Humidity,62,%,Equipment,Freezer A",
+            "2024-01-01 12:00:00,AMB-002,Ambient Temperature,5.5,°C,Ambient,Freezer A Ambient",
+            "2024-01-01 12:05:00,AMB-002,Ambient Humidity,58,%,Ambient,Freezer A Ambient",
+            "",
+        ]
+    )
+    file_obj = InMemoryFile(csv_text, "assigned_spaces.csv")
+
+    dfs, ranges = _parse_probe_files([file_obj])
+
+    equipment_key = "assigned_spaces.csv - Freezer A (Equipment) [EQ-001]"
+    ambient_key = "assigned_spaces.csv - Freezer A Ambient (Ambient) [AMB-002]"
+
+    assert equipment_key in dfs
+    assert ambient_key in dfs
+
+    df_equipment = dfs[equipment_key]
+    df_ambient = dfs[ambient_key]
+
+    assert list(df_equipment.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
+    assert list(df_ambient.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
+
+    assert ranges[equipment_key]["Temperature"] == (15, 25)
+    assert ranges[ambient_key]["Humidity"] == (0, 60)
