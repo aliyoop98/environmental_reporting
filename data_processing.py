@@ -130,10 +130,45 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
 
     channel = (channel or '').strip().lower()
     unit = (unit or '').strip().lower()
-    if any(token in channel for token in ('temp', '°c')) or 'c' in unit:
-        return 'Temperature'
-    if any(token in channel for token in ('hum', '%')) or '%' in unit or 'rh' in unit:
+
+    # Normalise the unit text so we can reliably inspect the tokens regardless of
+    # punctuation, case, or unicode symbols (e.g. "°F").
+    unit_normalised = (
+        unit.replace('°', ' ')
+        .replace('degrees', 'deg')
+        .replace('/', ' ')
+        .replace('-', ' ')
+        .replace('_', ' ')
+    )
+    unit_tokens = {token for token in unit_normalised.split() if token}
+
+    humidity_tokens = {'%', 'percent', 'humidity', 'humid', 'rh'}
+    if (
+        any(token in channel for token in ('hum', '%'))
+        or '%' in unit
+        or unit_tokens & humidity_tokens
+    ):
         return 'Humidity'
+
+    temperature_tokens = {
+        'temp',
+        'temperature',
+        'degc',
+        'c',
+        'celsius',
+        'degf',
+        'f',
+        'fahrenheit',
+        'degk',
+        'k',
+        'kelvin',
+    }
+    if (
+        any(token in channel for token in ('temp', '°c', '°f'))
+        or unit_tokens & temperature_tokens
+    ):
+        return 'Temperature'
+
     return None
 
 
