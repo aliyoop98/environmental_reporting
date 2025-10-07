@@ -434,6 +434,45 @@ def parse_serial_csv(files):
     return serials
 
 
+def serial_data_to_primary(serials: Mapping[str, Dict[str, object]]) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Dict[str, Tuple[float, float]]]]:
+    """Convert parsed serial datasets into primary probe-style structures.
+
+    Parameters
+    ----------
+    serials:
+        Mapping of serial dataset keys to the metadata produced by
+        :func:`parse_serial_csv`.
+
+    Returns
+    -------
+    Tuple[Dict[str, pd.DataFrame], Dict[str, Dict[str, Tuple[float, float]]]]
+        Two dictionaries mirroring the output of :func:`_parse_probe_files`.
+        The first maps dataset keys to processed dataframes suitable for the
+        primary probe workflow, ensuring the ``Date`` column uses a
+        ``datetime64`` dtype so downstream ``.dt`` accessors are valid.  The
+        second maps dataset keys to their channel range configuration.
+    """
+
+    primary_dfs: Dict[str, pd.DataFrame] = {}
+    primary_ranges: Dict[str, Dict[str, Tuple[float, float]]] = {}
+
+    for key, info in serials.items():
+        df = info.get('df')
+        if df is None:
+            continue
+        df_converted = df.copy()
+        if 'Date' in df_converted.columns:
+            df_converted['Date'] = pd.to_datetime(df_converted['Date'], errors='coerce')
+        primary_dfs[key] = df_converted
+        range_map = info.get('range_map')
+        if isinstance(range_map, dict):
+            primary_ranges[key] = range_map
+        else:
+            primary_ranges[key] = {}
+
+    return primary_dfs, primary_ranges
+
+
 def _parse_tempstick_files(files):
     tempdfs = {}
     if not files:

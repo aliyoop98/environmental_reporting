@@ -20,6 +20,7 @@ if __package__:
         _parse_probe_files,
         _parse_tempstick_files,
         parse_serial_csv,
+        serial_data_to_primary,
     )
 else:
     if str(CURRENT_DIR) not in sys.path:
@@ -48,10 +49,11 @@ primary_probe_files = st.sidebar.file_uploader(
     accept_multiple_files=True,
     key="primary_probe_uploader"
 )
-
-if not primary_probe_files:
-    st.sidebar.info("Upload Primary Probe CSV files to begin.")
-    st.stop()
+serial_files = st.sidebar.file_uploader(
+    "Upload Consolidated Serial CSV files",
+    accept_multiple_files=True,
+    key="serial_uploader"
+)
 
 
 def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]:
@@ -72,23 +74,22 @@ def _state_key(prefix: str, identifier: str) -> str:
     return f"{prefix}_{digest}"
 
 primary_dfs, primary_ranges = _parse_probe_files(primary_probe_files)
-if not primary_dfs:
-    st.sidebar.error("No valid primary probe data found.")
-    st.stop()
-
-# Consolidated serial datasets live alongside the primary probe configuration so
-# users can configure assignments once and reuse them across tabs.
-serial_files = st.sidebar.file_uploader(
-    "Upload Consolidated Serial CSV files",
-    accept_multiple_files=True,
-    key="serial_uploader"
-)
 serial_data = parse_serial_csv(serial_files)
-serial_label_state_keys = {}
 
-if serial_data:
+using_serial_as_primary = False
+if not primary_dfs and serial_data:
+    using_serial_as_primary = True
+    primary_dfs, primary_ranges = serial_data_to_primary(serial_data)
+    st.sidebar.info("Using consolidated serial datasets for primary charting.")
+elif not primary_dfs:
+    st.sidebar.info("Upload primary probe or consolidated serial CSV files to begin.")
+    st.stop()
+serial_label_state_keys = {}
+serial_overlay_data = serial_data if not using_serial_as_primary else {}
+
+if serial_overlay_data:
     st.sidebar.caption("Serial number datasets")
-    for option_key, info in serial_data.items():
+    for option_key, info in serial_overlay_data.items():
         state_key = _state_key("serial_label", str(option_key))
         serial_label_state_keys[option_key] = state_key
         st.session_state.setdefault(state_key, info['default_label'])
@@ -96,7 +97,7 @@ if serial_data:
             f"Legend label for {info['option_label']}",
             key=state_key
         )
-else:
+elif not serial_data:
     st.sidebar.info("Upload consolidated serial CSV files to overlay serial data.")
 
 
@@ -108,13 +109,21 @@ def _format_primary_option(name: str) -> str:
 
 
 serial_assignments = {}
-if serial_data:
+if serial_overlay_data:
     st.sidebar.markdown("### Serial Assignments")
     primary_options = list(primary_dfs.keys())
-    for serial_key, info in serial_data.items():
+    for serial_key, info in serial_overlay_data.items():
         assign_key = _state_key("serial_assignment", str(serial_key))
-        existing = st.session_state.get(assign_key, [])
+        existing = st.session_state.get(assign_key)
+        if existing is None and primary_options:
+            default_assignment = [primary_options[0]]
+            st.session_state[assign_key] = default_assignment
+            existing = default_assignment
+        if existing is None:
+            existing = []
         valid_existing = [opt for opt in existing if opt in primary_options]
+        if not valid_existing and primary_options:
+            valid_existing = [primary_options[0]]
         if existing != valid_existing:
             st.session_state[assign_key] = valid_existing
         serial_assignments[serial_key] = st.sidebar.multiselect(
@@ -402,19 +411,19 @@ for tab, name in zip(tabs, primary_dfs):
                 value = st.session_state.get(state_key)
                 if value:
                     return value
-            info = serial_data.get(opt) if serial_data else None
+            info = serial_overlay_data.get(opt) if serial_overlay_data else None
             if info:
                 return info['option_label']
             return opt
 
         assigned_serials = []
-        if serial_data:
+        if serial_overlay_data:
             for serial_key, assigned in serial_assignments.items():
                 if name in assigned:
                     assigned_serials.append(serial_key)
 
         serial_selection_key = f"serial_select_{name}"
-        serial_options = list(serial_data.keys()) if serial_data else []
+        serial_options = list(serial_overlay_data.keys()) if serial_overlay_data else []
         current_selection = [
             opt for opt in st.session_state.get(serial_selection_key, [])
             if opt in serial_options
@@ -435,7 +444,7 @@ for tab, name in zip(tabs, primary_dfs):
 
         selected_serial_overlays = []
         for opt in serial_selection:
-            info = serial_data.get(opt)
+            info = serial_overlay_data.get(opt)
             if not info:
                 continue
             state_key = serial_label_state_keys.get(opt)
