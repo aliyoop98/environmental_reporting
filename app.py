@@ -76,6 +76,54 @@ if not primary_dfs:
     st.sidebar.error("No valid primary probe data found.")
     st.stop()
 
+# Consolidated serial datasets live alongside the primary probe configuration so
+# users can configure assignments once and reuse them across tabs.
+serial_files = st.sidebar.file_uploader(
+    "Upload Consolidated Serial CSV files",
+    accept_multiple_files=True,
+    key="serial_uploader"
+)
+serial_data = parse_serial_csv(serial_files)
+serial_label_state_keys = {}
+
+if serial_data:
+    st.sidebar.caption("Serial number datasets")
+    for option_key, info in serial_data.items():
+        state_key = _state_key("serial_label", str(option_key))
+        serial_label_state_keys[option_key] = state_key
+        st.session_state.setdefault(state_key, info['default_label'])
+        st.sidebar.text_input(
+            f"Legend label for {info['option_label']}",
+            key=state_key
+        )
+else:
+    st.sidebar.info("Upload consolidated serial CSV files to overlay serial data.")
+
+
+def _format_primary_option(name: str) -> str:
+    path = Path(name)
+    if path.suffix:
+        return path.stem
+    return name
+
+
+serial_assignments = {}
+if serial_data:
+    st.sidebar.markdown("### Serial Assignments")
+    primary_options = list(primary_dfs.keys())
+    for serial_key, info in serial_data.items():
+        assign_key = _state_key("serial_assignment", str(serial_key))
+        existing = st.session_state.get(assign_key, [])
+        valid_existing = [opt for opt in existing if opt in primary_options]
+        if existing != valid_existing:
+            st.session_state[assign_key] = valid_existing
+        serial_assignments[serial_key] = st.sidebar.multiselect(
+            f"Assign to {info['option_label']}",
+            options=primary_options,
+            format_func=_format_primary_option,
+            key=assign_key,
+        )
+
 # Year & Month selection
 years = sorted({dt.year for df in primary_dfs.values() for dt in df['Date'].dropna()})
 months = sorted({dt.month for df in primary_dfs.values() for dt in df['Date'].dropna()})
@@ -348,24 +396,6 @@ for tab, name in zip(tabs, primary_dfs):
         )
         tempdfs = _parse_tempstick_files(tempstick_files)
 
-        serial_files = st.file_uploader(
-            "Upload Consolidated Serial CSV files (optional)",
-            accept_multiple_files=True,
-            key=f"serial_{name}"
-        )
-        serial_data = parse_serial_csv(serial_files)
-        serial_label_state_keys = {}
-        if serial_data:
-            st.caption("Serial number datasets")
-            for option_key, info in serial_data.items():
-                state_key = _state_key(f"serial_label_{name}", str(option_key))
-                serial_label_state_keys[option_key] = state_key
-                st.session_state.setdefault(state_key, info['default_label'])
-                st.text_input(
-                    f"Legend label for {info['option_label']}",
-                    key=state_key
-                )
-
         def _format_serial_option(opt):
             state_key = serial_label_state_keys.get(opt)
             if state_key:
@@ -377,16 +407,31 @@ for tab, name in zip(tabs, primary_dfs):
                 return info['option_label']
             return opt
 
-        serial_selection = (
-            st.multiselect(
+        assigned_serials = []
+        if serial_data:
+            for serial_key, assigned in serial_assignments.items():
+                if name in assigned:
+                    assigned_serials.append(serial_key)
+
+        serial_selection_key = f"serial_select_{name}"
+        serial_options = list(serial_data.keys()) if serial_data else []
+        current_selection = [
+            opt for opt in st.session_state.get(serial_selection_key, [])
+            if opt in serial_options
+        ]
+        for opt in assigned_serials:
+            if opt not in current_selection:
+                current_selection.append(opt)
+        if serial_options:
+            st.session_state[serial_selection_key] = current_selection
+            serial_selection = st.multiselect(
                 "Assign serial overlays",
-                options=list(serial_data.keys()),
+                options=serial_options,
                 format_func=_format_serial_option,
-                key=f"serial_select_{name}"
+                key=serial_selection_key,
             )
-            if serial_data
-            else []
-        )
+        else:
+            serial_selection = []
 
         selected_serial_overlays = []
         for opt in serial_selection:
