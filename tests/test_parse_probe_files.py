@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from data_processing import _parse_probe_files, parse_serial_csv
+from data_processing import _parse_probe_files, parse_serial_csv, serial_data_to_primary
 
 
 class InMemoryFile(io.BytesIO):
@@ -138,3 +138,28 @@ def test_parse_serial_csv_extracts_unique_serials():
     assert list(df_a.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
     assert info_a['serial'] == "SN-A"
     assert info_a['default_label'] in {"Chamber 1", "SN-A"}
+
+
+def test_serial_data_to_primary_uses_datetime_dates():
+    csv_text = "\n".join(
+        [
+            "Timestamp,Serial Number,Channel,Data,Unit of Measure",
+            "2024-03-01 00:00:00,SN-10,Temperature,5.0,°C",
+            "2024-03-01 00:05:00,SN-10,Humidity,45,%",
+            "",
+        ]
+    )
+    file_obj = InMemoryFile(csv_text, "serial_primary.csv")
+
+    serials = parse_serial_csv([file_obj])
+    primary_dfs, primary_ranges = serial_data_to_primary(serials)
+
+    key = "serial_primary.csv [SN-10]"
+    assert key in primary_dfs
+    df_primary = primary_dfs[key]
+
+    # ``.dt`` access should succeed thanks to datetime conversion.
+    years = df_primary['Date'].dt.year.tolist()
+    assert set(years) == {2024}
+
+    assert primary_ranges[key] == serials[key]['range_map']
