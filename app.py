@@ -176,15 +176,98 @@ def _prepare_serial_primary(
 
     return primary_dfs, primary_ranges, metadata
 
-try:
-    serial_data = parse_serial_csv(serial_files)
-except Exception as e:
-    st.sidebar.error("Failed to parse serial CSVs.")
-    st.sidebar.exception(e)
-    st.stop()
-if not serial_data:
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _parse_cached(file_name: str, file_bytes: bytes):
+    if __package__:
+        from .data_processing import parse_serial_csv
+    else:
+        from data_processing import parse_serial_csv
+
+    class _MemoryFile:
+        def __init__(self, name: str, data: bytes):
+            self.name = name
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+        def seek(self, *_args, **_kwargs) -> None:  # pragma: no cover - interface shim
+            return None
+
+    return parse_serial_csv([_MemoryFile(file_name, file_bytes)])
+
+
+def _downsample(df: pd.DataFrame, max_points: int = 5000) -> pd.DataFrame:
+    if df is None or df.empty or "DateTime" not in df.columns:
+        return df
+    if len(df) <= max_points:
+        return df
+
+    df_sorted = df.sort_values("DateTime")
+    span = df_sorted["DateTime"].iloc[-1] - df_sorted["DateTime"].iloc[0]
+    span_minutes = max(1, int(span.total_seconds() // 60) or 1)
+    divisor = max(1, max_points // 2)
+    step = max(1, span_minutes // divisor)
+
+    resampled = (
+        df_sorted.set_index("DateTime")
+        .resample(f"{step}T")
+        .mean(numeric_only=True)
+        .dropna(how="all")
+        .reset_index()
+    )
+    if resampled.empty:
+        return df_sorted
+
+    data_cols = [col for col in df.columns if col not in {"Date", "Time", "DateTime"}]
+    for col in data_cols:
+        if col not in resampled.columns:
+            resampled[col] = pd.NA
+
+    resampled["Date"] = resampled["DateTime"].dt.date
+    resampled["Time"] = resampled["DateTime"].dt.strftime("%H:%M")
+
+    column_order = [col for col in ["Date", "Time", "DateTime"] if col in resampled.columns]
+    column_order.extend([col for col in data_cols if col in resampled.columns])
+    return resampled[column_order].reset_index(drop=True)
+
+
+serial_data: Dict[str, Dict[str, object]] = {}
+total_rows = 0
+if serial_files:
+    progress = st.sidebar.progress(0.0)
+    for idx, uploaded in enumerate(serial_files, start=1):
+        try:
+            file_bytes = uploaded.getvalue()
+            parsed = _parse_cached(uploaded.name, file_bytes)
+        except Exception as exc:  # pragma: no cover - Streamlit UI feedback
+            st.sidebar.error(f"Failed to parse {uploaded.name}")
+            st.sidebar.exception(exc)
+            parsed = {}
+        for key, info in parsed.items():
+            serial_data[key] = info
+            df_obj = info.get('df') if isinstance(info, dict) else None
+            if isinstance(df_obj, pd.DataFrame):
+                total_rows += len(df_obj)
+        progress.progress(idx / max(len(serial_files), 1))
+    progress.empty()
+else:
     st.sidebar.info("Upload consolidated serial CSV files to begin.")
+
+if not serial_data:
     st.stop()
+
+if total_rows > 2_000_000:
+    st.sidebar.warning(
+        "Large upload detected (>2 million rows). Consider fewer files or a smaller month."
+    )
+
+st.sidebar.markdown("### Serial Data Sets")
+for key, info in serial_data.items():
+    df_obj = info.get('df') if isinstance(info, dict) else None
+    row_count = len(df_obj) if isinstance(df_obj, pd.DataFrame) else 0
+    st.sidebar.caption(f"{key}: {row_count:,} rows")
 
 primary_dfs, primary_ranges, serial_metadata = _prepare_serial_primary(serial_data)
 if not primary_dfs:
@@ -345,10 +428,12 @@ def _build_outputs(
         "warnings": [],
     }
 
-    sel = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
-    if sel.empty:
+    sel_full = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
+    if sel_full.empty:
         result["warnings"].append("No data for selected period.")
         return result
+
+    sel = _downsample(sel_full)
 
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
@@ -388,10 +473,13 @@ def _build_outputs(
                 label_dict = secondary_labels
             if comp_df is None:
                 continue
-            comp_sel = comp_df[
+            comp_sel_full = comp_df[
                 (comp_df['Date'].dt.year == year)
                 & (comp_df['Date'].dt.month == month)
             ].sort_values('DateTime').reset_index(drop=True)
+            if comp_sel_full.empty:
+                continue
+            comp_sel = _downsample(comp_sel_full)
             if ch not in comp_sel.columns:
                 continue
             comp_label = label_dict.get(comp_name, comp_name)
@@ -404,10 +492,13 @@ def _build_outputs(
             ts_df = tempdfs.get(ts_name)
             if ts_df is None:
                 continue
-            ts_filtered = ts_df[
+            ts_filtered_full = ts_df[
                 (ts_df['DateTime'].dt.year == year)
                 & (ts_df['DateTime'].dt.month == month)
             ].copy()
+            if ts_filtered_full.empty:
+                continue
+            ts_filtered = _downsample(ts_filtered_full)
             ts_column = _match_tempstick_channel(ts_filtered, ch)
             if not ts_column:
                 continue
@@ -421,10 +512,13 @@ def _build_outputs(
             overlay_df = overlay.get('df')
             if overlay_df is None or ch not in overlay_df.columns:
                 continue
-            overlay_filtered = overlay_df[
+            overlay_filtered_full = overlay_df[
                 (overlay_df['DateTime'].dt.year == year)
                 & (overlay_df['DateTime'].dt.month == month)
             ].copy()
+            if overlay_filtered_full.empty:
+                continue
+            overlay_filtered = _downsample(overlay_filtered_full)
             if overlay_filtered.empty or ch not in overlay_filtered.columns:
                 continue
             overlay_label = overlay.get('label') or 'Serial'
@@ -501,7 +595,7 @@ def _build_outputs(
 
         ch_lo, ch_hi = primary_ranges[name].get(ch, (None, None))
         if ch_lo is not None:
-            df_ch = sel[['DateTime', ch]].copy()
+            df_ch = sel_full[['DateTime', ch]].copy()
             df_ch['OOR'] = df_ch[ch].apply(lambda v: pd.notna(v) and (v < ch_lo or v > ch_hi))
             df_ch['Group'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
             events = []
