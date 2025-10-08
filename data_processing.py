@@ -1,8 +1,161 @@
 import io
+import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 import pandas as pd
+
+_ZERO_WIDTH_CHARS = ("\ufeff", "\u200b", "\u200c", "\u200d")
+
+
+def _strip_bom_and_zero_width(text: str) -> str:
+    for ch in _ZERO_WIDTH_CHARS:
+        text = text.replace(ch, "")
+    return text
+
+
+_DEVICE_ID_RE = re.compile(r"device\s*id\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def _split_report_header_and_table(
+    text: str,
+) -> Optional[Tuple[Dict[str, Optional[str]], List[str]]]:
+    """Split Traceable Live report text into metadata and table lines."""
+
+    if not text:
+        return None
+
+    lines = [_strip_bom_and_zero_width(line) for line in text.splitlines()]
+    if not any(line.lstrip().lower().startswith("device id:") for line in lines):
+        return None
+
+    table_start = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("timestamp") and "data" in lowered and "range" in lowered:
+            table_start = idx
+            break
+    if table_start is None:
+        return None
+
+    device_id: Optional[str] = None
+    device_name: Optional[str] = None
+    timezone: Optional[str] = None
+    header_slice = lines[:table_start]
+    for line in header_slice:
+        match = _DEVICE_ID_RE.search(line)
+        if match:
+            device_id = match.group(1)
+        lower = line.lower()
+        if lower.startswith("device name:"):
+            device_name = line.split(":", 1)[1].strip()
+        elif lower.startswith("report timezone:"):
+            timezone = line.split(":", 1)[1].strip()
+
+    table_lines: List[str] = []
+    header_added = False
+    for line in lines[table_start:]:
+        if not header_added:
+            table_lines.append(line)
+            header_added = True
+            continue
+        if not line.strip():
+            break
+        if line.strip().lower().startswith("channel data for"):
+            break
+        table_lines.append(line)
+
+    if len(table_lines) <= 1:
+        return None
+
+    meta = {"device_id": device_id, "device_name": device_name, "timezone": timezone}
+    return meta, table_lines
+
+
+def _parse_traceable_report_csv(text: str, source_name: str) -> List[Dict[str, object]]:
+    """Parse Traceable Live per-asset report CSVs."""
+
+    split = _split_report_header_and_table(text)
+    if not split:
+        return []
+
+    meta, table_lines = split
+    csv_text = "\n".join(table_lines)
+    try:
+        df = pd.read_csv(io.StringIO(csv_text), engine="python")
+    except Exception:
+        return []
+
+    if df.empty:
+        return []
+
+    normalized_cols = {
+        _normalize_header(col): col for col in df.columns if isinstance(col, str)
+    }
+    timestamp_col = normalized_cols.get("timestamp")
+    data_col = normalized_cols.get("data")
+    if not timestamp_col or not data_col:
+        return []
+
+    df = df.rename(columns={timestamp_col: "Timestamp", data_col: "Data"})
+
+    def _to_temp_c(value: object) -> object:
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            return float(value)
+        if not isinstance(value, str):
+            return pd.NA
+        text_value = _strip_bom_and_zero_width(value).strip()
+        if not text_value:
+            return pd.NA
+        lower = text_value.lower()
+        if "f" in lower and "c" not in lower:
+            return pd.NA
+        cleaned = (
+            text_value.replace("°", "")
+            .replace("deg", "")
+            .replace("degree", "")
+            .replace("celsius", "")
+            .replace("Celsius", "")
+        )
+        cleaned = cleaned.replace(" c", "c").replace(" C", "c")
+        match = re.search(r"(-?\d+(?:\.\d+)?)", cleaned)
+        if not match:
+            return pd.NA
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return pd.NA
+
+    out = pd.DataFrame()
+    out["DateTime"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+    out["Temperature"] = pd.to_numeric(df["Data"].apply(_to_temp_c), errors="coerce")
+    out = out.dropna(subset=["DateTime", "Temperature"], how="any")
+    if out.empty:
+        return []
+
+    out["Date"] = out["DateTime"].dt.date
+    out["Time"] = out["DateTime"].dt.strftime("%H:%M")
+    out = out[["DateTime", "Date", "Time", "Temperature"]]
+    out = out.sort_values("DateTime").reset_index(drop=True)
+
+    device_id = (meta.get("device_id") or "").strip()
+    serial = device_id
+    default_label = device_id or Path(source_name).stem
+    key = f"{source_name} [{serial}]" if serial else source_name
+
+    return [
+        {
+            "key": key,
+            "df": out,
+            "range_map": {},
+            "serial": serial,
+            "default_label": default_label,
+            "option_label": "",
+            "source_name": source_name,
+            "channels": ["Temperature"],
+        }
+    ]
 
 NEW_SCHEMA_ALIASES: Mapping[str, Tuple[str, ...]] = {
     'Timestamp': (
@@ -81,7 +234,7 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
     # Strip UTF-8 BOM(s) and zero-widths that sometimes stick to the first header.
     if text and text[0] == "\ufeff":
         text = text.lstrip("\ufeff")
-    text = text.replace("\ufeff", "")
+    text = _strip_bom_and_zero_width(text)
 
     for kwargs in ({"sep": None, "engine": "python"}, {}):
         try:
@@ -94,13 +247,7 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
         def _clean_column(column: object) -> object:
             if not isinstance(column, str):
                 return column
-            return (
-                column.replace("\ufeff", "")
-                .replace("\u200b", "")
-                .replace("\u200c", "")
-                .replace("\u200d", "")
-                .strip()
-            )
+            return _strip_bom_and_zero_width(column).strip()
 
         return df.rename(columns=_clean_column)
     return None
@@ -109,12 +256,7 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
 def _normalize_header(value: str) -> str:
     """Return a normalized representation of a CSV header for matching."""
 
-    value = (
-        value.replace("\ufeff", "")
-        .replace("\u200b", "")
-        .replace("\u200c", "")
-        .replace("\u200d", "")
-    )
+    value = _strip_bom_and_zero_width(value)
 
     cleaned = value.strip().lower()
     cleaned = cleaned.replace('#', ' number ')
@@ -484,6 +626,20 @@ def parse_serial_csv(files):
         f.seek(0)
         raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
         full_content = ''.join(raw)
+        report_groups = _parse_traceable_report_csv(full_content, f.name)
+        if report_groups:
+            for group in report_groups:
+                key = group.get('key', f.name)  # type: ignore[index]
+                serials[key] = {
+                    'df': group.get('df'),  # type: ignore[index]
+                    'range_map': group.get('range_map', {}),  # type: ignore[index]
+                    'serial': group.get('serial', ''),  # type: ignore[index]
+                    'default_label': group.get('default_label', ''),  # type: ignore[index]
+                    'option_label': group.get('option_label', ''),  # type: ignore[index]
+                    'source_name': group.get('source_name', f.name),  # type: ignore[index]
+                    'channels': group.get('channels', []),  # type: ignore[index]
+                }
+            continue
         df_full = _read_csv_flexible(full_content)
         if df_full is None:
             continue
