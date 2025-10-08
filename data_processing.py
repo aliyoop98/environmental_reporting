@@ -1,6 +1,6 @@
 import io
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Iterable, Mapping, List
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
@@ -78,10 +78,10 @@ DEFAULT_HUMIDITY_RANGE: Tuple[float, float] = (0, 60)
 def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
     """Read CSV content supporting multiple delimiters and BOM-bearing headers."""
 
-    if text:
-        # Remove UTF-8 BOM from the start and any stray BOM occurrences within the text.
+    # Strip UTF-8 BOM(s) and zero-widths that sometimes stick to the first header.
+    if text and text[0] == "\ufeff":
         text = text.lstrip("\ufeff")
-        text = text.replace("\ufeff", "")
+    text = text.replace("\ufeff", "")
 
     for kwargs in ({"sep": None, "engine": "python"}, {}):
         try:
@@ -91,7 +91,7 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
         except Exception:
             continue
 
-        def _clean_column(column: str) -> str:
+        def _clean_column(column: object) -> object:
             if not isinstance(column, str):
                 return column
             return (

@@ -176,7 +176,12 @@ def _prepare_serial_primary(
 
     return primary_dfs, primary_ranges, metadata
 
-serial_data = parse_serial_csv(serial_files)
+try:
+    serial_data = parse_serial_csv(serial_files)
+except Exception as e:
+    st.sidebar.error("Failed to parse serial CSVs.")
+    st.sidebar.exception(e)
+    st.stop()
 if not serial_data:
     st.sidebar.info("Upload consolidated serial CSV files to begin.")
     st.stop()
