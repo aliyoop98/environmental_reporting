@@ -1,5 +1,6 @@
 import io
 import re
+from itertools import chain
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -15,6 +16,44 @@ def _strip_bom_and_zero_width(text: str) -> str:
 
 
 _DEVICE_ID_RE = re.compile(r"device\s*id\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    for col in ("Temperature", "Humidity"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast="float")
+    return df
+
+
+def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    result = df.copy()
+    if "DateTime" in result.columns:
+        result["DateTime"] = pd.to_datetime(result["DateTime"], errors="coerce")
+        result = result.dropna(subset=["DateTime"])  # type: ignore[arg-type]
+        result = result.sort_values("DateTime")
+        result["Date"] = result["DateTime"].dt.date
+        result["Time"] = result["DateTime"].dt.strftime("%H:%M")
+
+    subset = ["DateTime"]
+    for col in ("Temperature", "Humidity"):
+        if col in result.columns:
+            subset.append(col)
+    if len(subset) > 1:
+        result = result.drop_duplicates(subset=subset, keep="last")
+
+    result = _downcast_numeric(result)
+
+    ordered: List[str] = []
+    for col in ["Date", "Time", "DateTime", "Temperature", "Humidity"]:
+        if col in result.columns:
+            ordered.append(col)
+    if ordered:
+        result = result[ordered]
+
+    return result.reset_index(drop=True)
 
 
 def _split_report_header_and_table(
@@ -137,7 +176,7 @@ def _parse_traceable_report_csv(text: str, source_name: str) -> List[Dict[str, o
     out["Date"] = out["DateTime"].dt.date
     out["Time"] = out["DateTime"].dt.strftime("%H:%M")
     out = out[["DateTime", "Date", "Time", "Temperature"]]
-    out = out.sort_values("DateTime").reset_index(drop=True)
+    out = _finalize_serial_dataframe(out)
 
     device_id = (meta.get("device_id") or "").strip()
     serial = device_id
@@ -251,6 +290,106 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
 
         return df.rename(columns=_clean_column)
     return None
+
+
+def _clean_chunk_columns(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map: Dict[str, str] = {}
+    for col in df.columns:
+        if isinstance(col, str):
+            rename_map[col] = _strip_bom_and_zero_width(col).strip()
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
+
+
+def _parse_consolidated_serial_text(
+    text: str,
+    name: str,
+    default_temp_range: Tuple[float, float],
+    default_humidity_range: Tuple[float, float],
+) -> Dict[str, Dict[str, object]]:
+    cleaned_text = _strip_bom_and_zero_width(text)
+    attempts = ({"sep": None, "engine": "python"}, {"engine": "python"})
+    aggregated: Dict[str, Dict[str, object]] = {}
+
+    for kwargs in attempts:
+        try:
+            reader = pd.read_csv(
+                io.StringIO(cleaned_text),
+                chunksize=50_000,
+                index_col=False,
+                on_bad_lines="skip",
+                **kwargs,
+            )
+            first_chunk = next(reader)
+        except StopIteration:
+            return {}
+        except Exception:
+            continue
+
+        for chunk in chain([first_chunk], reader):
+            if chunk is None or chunk.empty:
+                continue
+            chunk = _clean_chunk_columns(chunk)
+            try:
+                groups = _process_new_schema_df(
+                    chunk,
+                    name,
+                    default_temp_range,
+                    default_humidity_range,
+                )
+            except Exception:
+                continue
+            for group in groups:
+                key = group['key']  # type: ignore[index]
+                bucket = aggregated.setdefault(
+                    key,
+                    {
+                        'dfs': [],
+                        'range_map': {},
+                        'serial': group.get('serial', ''),
+                        'default_label': group.get('default_label', ''),
+                        'option_label': group.get('option_label', ''),
+                        'source_name': group.get('source_name', name),
+                        'channels': [],
+                    },
+                )
+                bucket['dfs'].append(group.get('df'))
+                bucket['range_map'].update(group.get('range_map', {}))
+                if group.get('serial') and not bucket.get('serial'):
+                    bucket['serial'] = group.get('serial')
+                if group.get('default_label') and not bucket.get('default_label'):
+                    bucket['default_label'] = group.get('default_label')
+                if group.get('option_label') and not bucket.get('option_label'):
+                    bucket['option_label'] = group.get('option_label')
+                if group.get('source_name'):
+                    bucket['source_name'] = group.get('source_name')
+                channels = bucket.setdefault('channels', [])
+                for ch in group.get('channels', []):
+                    if ch not in channels:
+                        channels.append(ch)
+        break
+
+    results: Dict[str, Dict[str, object]] = {}
+    for key, bucket in aggregated.items():
+        dfs = [df for df in bucket.get('dfs', []) if isinstance(df, pd.DataFrame)]
+        if not dfs:
+            continue
+        combined = pd.concat(dfs, ignore_index=True)
+        finalized = _finalize_serial_dataframe(combined)
+        if finalized.empty:
+            continue
+        results[key] = {
+            'df': finalized,
+            'range_map': bucket.get('range_map', {}),
+            'serial': bucket.get('serial', ''),
+            'default_label': bucket.get('default_label', ''),
+            'option_label': bucket.get('option_label', ''),
+            'source_name': bucket.get('source_name', name),
+            'channels': bucket.get('channels', []),
+        }
+
+    return results
 
 
 def _normalize_header(value: str) -> str:
@@ -623,9 +762,15 @@ def parse_serial_csv(files):
     default_temp_range = DEFAULT_TEMP_RANGE
     default_humidity_range = DEFAULT_HUMIDITY_RANGE
     for f in files:
-        f.seek(0)
-        raw = f.read().decode('utf-8', errors='ignore').splitlines(True)
-        full_content = ''.join(raw)
+        try:
+            f.seek(0)
+        except Exception:
+            pass
+        raw_bytes = f.read()
+        if isinstance(raw_bytes, str):
+            full_content = raw_bytes
+        else:
+            full_content = raw_bytes.decode('utf-8', errors='ignore')
         report_groups = _parse_traceable_report_csv(full_content, f.name)
         if report_groups:
             for group in report_groups:
@@ -640,23 +785,33 @@ def parse_serial_csv(files):
                     'channels': group.get('channels', []),  # type: ignore[index]
                 }
             continue
-        df_full = _read_csv_flexible(full_content)
-        if df_full is None:
-            continue
-        groups = _process_new_schema_df(
-            df_full, f.name, default_temp_range, default_humidity_range
+        chunk_results = _parse_consolidated_serial_text(
+            full_content,
+            f.name,
+            default_temp_range,
+            default_humidity_range,
         )
-        for group in groups:
-            key = group['key']  # type: ignore[index]
-            serials[key] = {
-                'df': group['df'],  # type: ignore[index]
-                'range_map': group['range_map'],  # type: ignore[index]
-                'serial': group['serial'],  # type: ignore[index]
-                'default_label': group['default_label'],  # type: ignore[index]
-                'option_label': group['option_label'],  # type: ignore[index]
-                'source_name': group['source_name'],  # type: ignore[index]
-                'channels': group['channels'],  # type: ignore[index]
-            }
+        if not chunk_results:
+            df_full = _read_csv_flexible(full_content)
+            if df_full is None:
+                continue
+            groups = _process_new_schema_df(
+                df_full, f.name, default_temp_range, default_humidity_range
+            )
+            for group in groups:
+                key = group['key']  # type: ignore[index]
+                serials[key] = {
+                    'df': _finalize_serial_dataframe(group['df']),  # type: ignore[index]
+                    'range_map': group['range_map'],  # type: ignore[index]
+                    'serial': group['serial'],  # type: ignore[index]
+                    'default_label': group['default_label'],  # type: ignore[index]
+                    'option_label': group['option_label'],  # type: ignore[index]
+                    'source_name': group['source_name'],  # type: ignore[index]
+                    'channels': group['channels'],  # type: ignore[index]
+                }
+            continue
+        for key, info in chunk_results.items():
+            serials[key] = info
     return serials
 
 
