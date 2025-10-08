@@ -76,7 +76,12 @@ DEFAULT_HUMIDITY_RANGE: Tuple[float, float] = (0, 60)
 
 
 def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
-    """Read CSV content supporting multiple delimiters."""
+    """Read CSV content supporting multiple delimiters and BOM-bearing headers."""
+
+    if text:
+        # Remove UTF-8 BOM from the start and any stray BOM occurrences within the text.
+        text = text.lstrip("\ufeff")
+        text = text.replace("\ufeff", "")
 
     for kwargs in ({"sep": None, "engine": "python"}, {}):
         try:
@@ -85,12 +90,31 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
             )
         except Exception:
             continue
-        return df.rename(columns=lambda c: c.strip() if isinstance(c, str) else c)
+
+        def _clean_column(column: str) -> str:
+            if not isinstance(column, str):
+                return column
+            return (
+                column.replace("\ufeff", "")
+                .replace("\u200b", "")
+                .replace("\u200c", "")
+                .replace("\u200d", "")
+                .strip()
+            )
+
+        return df.rename(columns=_clean_column)
     return None
 
 
 def _normalize_header(value: str) -> str:
     """Return a normalized representation of a CSV header for matching."""
+
+    value = (
+        value.replace("\ufeff", "")
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+    )
 
     cleaned = value.strip().lower()
     cleaned = cleaned.replace('#', ' number ')
