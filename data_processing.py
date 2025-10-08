@@ -108,10 +108,11 @@ def _match_new_schema_columns(columns: Iterable[str]) -> Optional[Dict[str, str]
         for col in columns
         if isinstance(col, str)
     }
-    matches: Dict[str, str] = {}
-    used: set[str] = set()
-    for canonical, aliases in NEW_SCHEMA_ALIASES.items():
-        match = next(
+
+    def _find_match(
+        aliases: Tuple[str, ...], used: set[str]
+    ) -> Optional[str]:
+        return next(
             (
                 original
                 for original, norm in normalized.items()
@@ -119,10 +120,35 @@ def _match_new_schema_columns(columns: Iterable[str]) -> Optional[Dict[str, str]
             ),
             None,
         )
+
+    matches: Dict[str, str] = {}
+    used: set[str] = set()
+
+    required_fields = (
+        'Timestamp',
+        'Serial Number',
+        'Channel',
+        'Data',
+    )
+    optional_fields = (
+        'Unit of Measure',
+    )
+
+    for canonical in required_fields:
+        aliases = NEW_SCHEMA_ALIASES.get(canonical, ())
+        match = _find_match(aliases, used)
         if match is None:
             return None
         matches[match] = canonical
         used.add(match)
+
+    for canonical in optional_fields:
+        aliases = NEW_SCHEMA_ALIASES.get(canonical, ())
+        match = _find_match(aliases, used)
+        if match is not None:
+            matches[match] = canonical
+            used.add(match)
+
     return matches
 
 
@@ -224,7 +250,10 @@ def _process_new_schema_df(
         df_new['Serial Number'].astype(str).str.strip()
     )
     df_new['Channel'] = df_new['Channel'].astype(str)
-    df_new['Unit of Measure'] = df_new['Unit of Measure'].astype(str)
+    if 'Unit of Measure' in df_new.columns:
+        df_new['Unit of Measure'] = df_new['Unit of Measure'].astype(str)
+    else:
+        df_new['Unit of Measure'] = ''
     df_new = df_new.dropna(subset=['Timestamp', 'Serial Number'])
     df_new['Data'] = pd.to_numeric(df_new['Data'], errors='coerce')
     if df_new.empty:
@@ -262,6 +291,23 @@ def _process_new_schema_df(
             ),
             axis=1,
         )
+        unit_series = sdf['Unit of Measure'].fillna('').astype(str)
+        unit_clean = unit_series.str.strip().str.lower()
+        missing_measurement = sdf['Measurement'].isna()
+        unit_missing = unit_clean.isin({'', 'nan', 'none', 'null'})
+        fallback_mask = missing_measurement & unit_missing
+        if fallback_mask.any():
+            channel_norm = (
+                sdf.loc[fallback_mask, 'Channel']
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            fallback_map = {
+                'sensor1': 'Humidity',
+                'sensor2': 'Temperature',
+            }
+            sdf.loc[fallback_mask, 'Measurement'] = channel_norm.map(fallback_map)
         sdf = sdf.dropna(subset=['Measurement'])
         if sdf.empty:
             continue

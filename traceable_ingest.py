@@ -1,4 +1,11 @@
-"""Traceable CSV ingestion utilities."""
+"""Traceable CSV ingestion utilities.
+
+This module implements an alternative ingest path that yields columns such as
+``datetime``, ``temp_c`` and ``rh_percent``. The Streamlit app (`app.py`) does
+not import this module and instead expects the canonical schema produced by
+``data_processing.py`` (``DateTime``, ``Temperature``, ``Humidity``). The note
+exists to avoid wiring the two together inadvertently in the future.
+"""
 
 from __future__ import annotations
 
