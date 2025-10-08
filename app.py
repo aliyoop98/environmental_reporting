@@ -538,8 +538,36 @@ def _build_outputs(
             result["channel_results"][ch] = channel_info
             continue
 
+        # --- Build a merged series for OOR (primary + overlays) ---
+        primary_legend = probe_label
+        probe_overlay_legends = probe_legends[1:] if len(probe_legends) > 1 else []
+        priority_order = [primary_legend] + probe_overlay_legends + tempstick_legends + serial_legends
+        piv = (
+            df_chart.pivot_table(
+                index="DateTime", columns="Legend", values="Value", aggfunc="mean"
+            )
+            .sort_index()
+        )
+
+        def _coalesce(df: pd.DataFrame, cols: List[str]) -> pd.Series:
+            if not cols:
+                return pd.Series(index=df.index, dtype="float64")
+            present_cols = [c for c in cols if c in df.columns]
+            if not present_cols:
+                return pd.Series(index=df.index, dtype="float64")
+            series = df[present_cols[0]].copy()
+            for col in present_cols[1:]:
+                series = series.combine_first(df[col])
+            return series
+
+        merged = _coalesce(piv, list(dict.fromkeys(priority_order))).rename("MergedValue")
+        merged_df = merged.reset_index().dropna(subset=["MergedValue"])
+
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
+        if not merged_df.empty:
+            data_min = float(min(data_min, merged_df['MergedValue'].min()))
+            data_max = float(max(data_max, merged_df['MergedValue'].max()))
         lo, hi = primary_ranges[name].get(ch, (data_min, data_max))
         raw_min, raw_max = min(data_min, lo), max(data_max, hi)
         span = (raw_max - raw_min) or 1
@@ -595,28 +623,25 @@ def _build_outputs(
 
         ch_lo, ch_hi = primary_ranges[name].get(ch, (None, None))
         if ch_lo is not None:
-            df_ch = sel_full[['DateTime', ch]].copy()
-            df_ch['OOR'] = df_ch[ch].apply(lambda v: pd.notna(v) and (v < ch_lo or v > ch_hi))
-            df_ch['Group'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
-            events = []
-            for _, grp in df_ch.groupby('Group'):
-                if not grp['OOR'].iloc[0]:
-                    continue
-                start = grp['DateTime'].iloc[0]
-                last_idx = grp.index[-1]
-                if last_idx + 1 < len(sel) and not df_ch.loc[last_idx + 1, 'OOR']:
-                    end = sel.loc[last_idx + 1, 'DateTime']
-                else:
+            if not merged_df.empty:
+                df_ch = merged_df.rename(columns={"MergedValue": ch}).copy()
+                df_ch = df_ch.sort_values("DateTime").drop_duplicates(subset=["DateTime"])
+                df_ch['OOR'] = df_ch[ch].apply(lambda v: pd.notna(v) and (v < ch_lo or v > ch_hi))
+                df_ch['Group'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
+                events = []
+                for _, grp in df_ch.groupby('Group'):
+                    if not grp['OOR'].iloc[0]:
+                        continue
+                    start = grp['DateTime'].iloc[0]
                     end = grp['DateTime'].iloc[-1]
-                duration = max((end - start).total_seconds() / 60, 0)
-                events.append({'Start': start, 'End': end, 'Duration(min)': duration})
-            if events:
-                ev_df = pd.DataFrame(events)
+                    duration = max((end - start).total_seconds() / 60, 0)
+                    events.append({'Start': start, 'End': end, 'Duration(min)': duration})
+                ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)'])
                 channel_info['oor_table'] = ev_df
-                total = ev_df['Duration(min)'].sum()
-                incident = total >= 60 or any(ev_df['Duration(min)'] > 60)
-                channel_info['total_minutes'] = float(total)
-                channel_info['incident'] = bool(incident)
+                total = float(ev_df['Duration(min)'].sum()) if not ev_df.empty else 0.0
+                incident = bool(total >= 60 or (not ev_df.empty and ev_df['Duration(min)'].max() > 60))
+                channel_info['total_minutes'] = total
+                channel_info['incident'] = incident
             else:
                 channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)'])
 
