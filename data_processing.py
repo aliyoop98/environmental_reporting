@@ -48,8 +48,13 @@ def _apply_inferred_temperature_range(
     default_range = _default_temp_range_for(profile)
     if not default_range:
         return
+    inferred_range = range_map.get("Temperature", default_range)
     for alias in TEMP_COL_ALIASES:
-        range_map[alias] = default_range
+        if alias == "Temperature":
+            if alias not in range_map:
+                range_map[alias] = inferred_range
+            continue
+        range_map.setdefault(alias, inferred_range)
 
 
 def _strip_bom_and_zero_width(text: str) -> str:
