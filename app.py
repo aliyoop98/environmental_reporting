@@ -36,7 +36,7 @@ st.markdown(
     """
     <style>
         .stApp { background-color: white; }
-        [data-testid="stSidebar"] { background-color: white; }
+        [data-testid="stSidebar"] { background-color: blue; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -592,13 +592,13 @@ def _build_outputs(
         observed_records: List[Dict[str, float]] = []
         observed_labels: List[str] = []
         if pd.notna(data_min):
-            observed_records.append({'y': float(data_min), 'Legend': 'Observed Min'})
-            observed_labels.append('Observed Min')
+            observed_records.append({'y': float(data_min), 'Legend': 'Range Min'})
+            observed_labels.append('Range Min')
         if pd.notna(data_max):
-            label = 'Observed Max'
+            label = 'Range Max'
             if observed_records and observed_records[0]['y'] == float(data_max):
-                observed_records[0]['Legend'] = 'Observed Min/Max'
-                observed_labels = ['Observed Min/Max']
+                observed_records[0]['Legend'] = 'Range Min/Max'
+                observed_labels = ['Range Min/Max']
             else:
                 observed_records.append({'y': float(data_max), 'Legend': label})
                 observed_labels.append(label)
@@ -874,7 +874,7 @@ for tab, name in zip(tabs, serial_keys):
                     limit_max = stats.get("limit_max")
                     if observed_min is not None and observed_max is not None:
                         stat_lines.append(
-                            f"Observed range: {observed_min:.2f} to {observed_max:.2f}"
+                            f"Acceptable range: {observed_min:.2f} to {observed_max:.2f}"
                         )
                     if limit_min is not None and limit_max is not None:
                         stat_lines.append(
@@ -923,7 +923,7 @@ if st.session_state["saved_results"]:
                 limit_max = stats.get("limit_max")
                 if observed_min is not None and observed_max is not None:
                     stat_lines.append(
-                        f"Observed range: {observed_min:.2f} to {observed_max:.2f}"
+                        f"Acceptable range: {observed_min:.2f} to {observed_max:.2f}"
                     )
                 if limit_min is not None and limit_max is not None:
                     stat_lines.append(
