@@ -626,7 +626,13 @@ def _build_outputs(
             color=alt.Color(
                 'Legend:N',
                 scale=color_scale,
-                legend=alt.Legend(title='Probe', labelLimit=0)
+                legend=alt.Legend(
+                    title='Series',
+                    orient='bottom',
+                    direction='horizontal',
+                    labelLimit=1000,
+                    columns=4,
+                )
             )
         )
         line = base.mark_line()
@@ -635,8 +641,23 @@ def _build_outputs(
             acceptable_df = pd.DataFrame(acceptable_records)
             layers.append(
                 alt.Chart(acceptable_df)
-                .mark_rule(strokeDash=[2, 2])
-                .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
+                .mark_rule(strokeDash=[4, 4])
+                .encode(
+                    y='y:Q',
+                    color=alt.Color('Legend:N', scale=color_scale),
+                )
+            )
+            legend_seed = acceptable_df[['Legend']].drop_duplicates().copy()
+            legend_seed['x'] = start_date
+            legend_seed['y'] = ymin
+            layers.append(
+                alt.Chart(legend_seed)
+                .mark_point(opacity=0)
+                .encode(
+                    x='x:T',
+                    y='y:Q',
+                    color=alt.Color('Legend:N', scale=color_scale),
+                )
             )
         title_lines = [
             f"{title_with_period} - {ch}",
@@ -647,6 +668,7 @@ def _build_outputs(
             .properties(title={"text": title_lines, "anchor": "start"})
             .configure_title(fontSize=14, lineHeight=20, offset=10)
             .configure(background="white", view=alt.ViewConfig(fill="white", stroke=None))
+            .configure_legend(symbolLimit=0)
         )
         channel_info["chart"] = chart
 
