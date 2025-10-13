@@ -112,7 +112,51 @@ def _split_report_header_and_table(
     return meta, table_lines
 
 
-def _parse_traceable_report_csv(text: str, source_name: str) -> List[Dict[str, object]]:
+_TEMP_RANGE_HINTS: Tuple[Tuple[Tuple[str, ...], Tuple[float, float]], ...] = (
+    (("ultra", "low", "freezer"), (-90, -60)),
+    (("ultralow",), (-90, -60)),
+    (("ult",), (-90, -60)),
+    (("minus", "80"), (-90, -60)),
+    (("-80",), (-90, -60)),
+    (("freezer",), (-35, -5)),
+    (("cold", "room"), (2, 8)),
+    (("cooler",), (2, 8)),
+    (("fridge",), (2, 8)),
+    (("refrigerator",), (2, 8)),
+)
+
+
+def _normalise_context_text(*values: Optional[str]) -> str:
+    """Return a normalised string used for range inference heuristics."""
+
+    pieces: List[str] = []
+    for value in values:
+        if not value:
+            continue
+        cleaned = re.sub(r"[^a-zA-Z0-9\s-]", " ", value.lower())
+        cleaned = cleaned.replace("-", " ")
+        pieces.append(" ".join(cleaned.split()))
+    return " ".join(piece for piece in pieces if piece)
+
+
+def _infer_temperature_range(
+    context: str, default_range: Tuple[float, float]
+) -> Tuple[float, float]:
+    """Infer a sensible temperature range from contextual text."""
+
+    if not context:
+        return default_range
+    for terms, range_values in _TEMP_RANGE_HINTS:
+        if all(term in context for term in terms):
+            return range_values
+    return default_range
+
+
+def _parse_traceable_report_csv(
+    text: str,
+    source_name: str,
+    default_temp_range: Tuple[float, float],
+) -> List[Dict[str, object]]:
     """Parse Traceable Live per-asset report CSVs."""
 
     split = _split_report_header_and_table(text)
@@ -183,11 +227,15 @@ def _parse_traceable_report_csv(text: str, source_name: str) -> List[Dict[str, o
     default_label = device_id or Path(source_name).stem
     key = f"{source_name} [{serial}]" if serial else source_name
 
+    context = _normalise_context_text(source_name, meta.get("device_name"))
+    temp_range = _infer_temperature_range(context, default_temp_range)
+    range_map = {"Temperature": temp_range}
+
     return [
         {
             "key": key,
             "df": out,
-            "range_map": {},
+            "range_map": range_map,
             "serial": serial,
             "default_label": default_label,
             "option_label": "",
@@ -771,7 +819,11 @@ def parse_serial_csv(files):
             full_content = raw_bytes
         else:
             full_content = raw_bytes.decode('utf-8', errors='ignore')
-        report_groups = _parse_traceable_report_csv(full_content, f.name)
+        report_groups = _parse_traceable_report_csv(
+            full_content,
+            f.name,
+            default_temp_range,
+        )
         if report_groups:
             for group in report_groups:
                 key = group.get('key', f.name)  # type: ignore[index]
