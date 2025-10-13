@@ -589,31 +589,34 @@ def _build_outputs(
             color_map[legend] = tempstick_palette[idx % len(tempstick_palette)]
         for idx, legend in enumerate(serial_legends):
             color_map[legend] = serial_palette[idx % len(serial_palette)]
-        observed_records: List[Dict[str, float]] = []
-        observed_labels: List[str] = []
-        if pd.notna(data_min):
-            observed_records.append({'y': float(data_min), 'Legend': 'Range Min'})
-            observed_labels.append('Range Min')
-        if pd.notna(data_max):
-            label = 'Range Max'
-            if observed_records and observed_records[0]['y'] == float(data_max):
-                observed_records[0]['Legend'] = 'Range Min/Max'
-                observed_labels = ['Range Min/Max']
-            else:
-                observed_records.append({'y': float(data_max), 'Legend': label})
-                observed_labels.append(label)
-        for legend in observed_labels:
+        acceptable_records: List[Dict[str, float]] = []
+        acceptable_labels: List[str] = []
+        if range_tuple:
+            lo_val, hi_val = range_tuple
+            if lo_val is not None and pd.notna(lo_val):
+                acceptable_records.append({'y': float(lo_val), 'Legend': 'Acceptable Min'})
+                acceptable_labels.append('Acceptable Min')
+            if hi_val is not None and pd.notna(hi_val):
+                label = 'Acceptable Max'
+                if acceptable_records and acceptable_records[0]['y'] == float(hi_val):
+                    acceptable_records[0]['Legend'] = 'Acceptable Min/Max'
+                    acceptable_labels = ['Acceptable Min/Max']
+                else:
+                    acceptable_records.append({'y': float(hi_val), 'Legend': label})
+                    acceptable_labels.append(label)
+        for legend in acceptable_labels:
             if legend not in color_map:
-                color_map[legend] = '#636363' if 'Min' in legend else '#9c9c9c'
-        color_map.update({'Lower Limit': '#2ca02c', 'Upper Limit': '#d62728'})
+                if legend.endswith('Max'):
+                    color_map[legend] = '#d62728'
+                elif legend.endswith('Min'):
+                    color_map[legend] = '#1f77b4'
+                else:
+                    color_map[legend] = '#9467bd'
         legend_entries: List[str] = []
         legend_entries.extend(probe_legends)
         legend_entries.extend(tempstick_legends)
         legend_entries.extend(serial_legends)
-        has_limits = ch in channel_ranges
-        if has_limits:
-            legend_entries.extend(['Lower Limit', 'Upper Limit'])
-        legend_entries.extend(observed_labels)
+        legend_entries.extend(acceptable_labels)
         legend_entries = list(dict.fromkeys(legend_entries))
         color_domain = [entry for entry in legend_entries if entry in color_map]
         color_scale = alt.Scale(domain=color_domain, range=[color_map[e] for e in color_domain])
@@ -628,18 +631,10 @@ def _build_outputs(
         )
         line = base.mark_line()
         layers = [line]
-        if has_limits:
-            lo, hi = channel_ranges[ch]
-            limits_df = pd.DataFrame({'y': [lo, hi], 'Legend': ['Lower Limit', 'Upper Limit']})
+        if acceptable_records:
+            acceptable_df = pd.DataFrame(acceptable_records)
             layers.append(
-                alt.Chart(limits_df)
-                .mark_rule(strokeDash=[4, 4])
-                .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
-            )
-        if observed_records:
-            observed_df = pd.DataFrame(observed_records)
-            layers.append(
-                alt.Chart(observed_df)
+                alt.Chart(acceptable_df)
                 .mark_rule(strokeDash=[2, 2])
                 .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
             )
@@ -874,7 +869,7 @@ for tab, name in zip(tabs, serial_keys):
                     limit_max = stats.get("limit_max")
                     if observed_min is not None and observed_max is not None:
                         stat_lines.append(
-                            f"Acceptable range: {observed_min:.2f} to {observed_max:.2f}"
+                            f"Observed range: {observed_min:.2f} to {observed_max:.2f}"
                         )
                     if limit_min is not None and limit_max is not None:
                         stat_lines.append(
@@ -923,7 +918,7 @@ if st.session_state["saved_results"]:
                 limit_max = stats.get("limit_max")
                 if observed_min is not None and observed_max is not None:
                     stat_lines.append(
-                        f"Acceptable range: {observed_min:.2f} to {observed_max:.2f}"
+                        f"Observed range: {observed_min:.2f} to {observed_max:.2f}"
                     )
                 if limit_min is not None and limit_max is not None:
                     stat_lines.append(
