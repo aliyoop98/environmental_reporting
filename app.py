@@ -445,7 +445,11 @@ def _build_outputs(
             "oor_table": None,
             "total_minutes": 0.0,
             "incident": False,
+            "stats": {},
+            "oor_reason": None,
         }
+
+        channel_ranges = primary_ranges.get(name, {})
 
         if ch not in sel.columns:
             channel_info["warning"] = f"Channel {ch} not found in data."
@@ -568,7 +572,9 @@ def _build_outputs(
         if not merged_df.empty:
             data_min = float(min(data_min, merged_df['MergedValue'].min()))
             data_max = float(max(data_max, merged_df['MergedValue'].max()))
-        lo, hi = primary_ranges[name].get(ch, (data_min, data_max))
+        range_tuple = channel_ranges.get(ch)
+        lo = range_tuple[0] if range_tuple else data_min
+        hi = range_tuple[1] if range_tuple else data_max
         raw_min, raw_max = min(data_min, lo), max(data_max, hi)
         span = (raw_max - raw_min) or 1
         pad = span * 0.1
@@ -583,12 +589,33 @@ def _build_outputs(
             color_map[legend] = tempstick_palette[idx % len(tempstick_palette)]
         for idx, legend in enumerate(serial_legends):
             color_map[legend] = serial_palette[idx % len(serial_palette)]
+        observed_records: List[Dict[str, float]] = []
+        observed_labels: List[str] = []
+        if pd.notna(data_min):
+            observed_records.append({'y': float(data_min), 'Legend': 'Observed Min'})
+            observed_labels.append('Observed Min')
+        if pd.notna(data_max):
+            label = 'Observed Max'
+            if observed_records and observed_records[0]['y'] == float(data_max):
+                observed_records[0]['Legend'] = 'Observed Min/Max'
+                observed_labels = ['Observed Min/Max']
+            else:
+                observed_records.append({'y': float(data_max), 'Legend': label})
+                observed_labels.append(label)
+        for legend in observed_labels:
+            if legend not in color_map:
+                color_map[legend] = '#636363' if 'Min' in legend else '#9c9c9c'
         color_map.update({'Lower Limit': '#2ca02c', 'Upper Limit': '#d62728'})
-        legend_entries = probe_legends + tempstick_legends + serial_legends
-        has_limits = ch in primary_ranges[name]
+        legend_entries: List[str] = []
+        legend_entries.extend(probe_legends)
+        legend_entries.extend(tempstick_legends)
+        legend_entries.extend(serial_legends)
+        has_limits = ch in channel_ranges
         if has_limits:
             legend_entries.extend(['Lower Limit', 'Upper Limit'])
-        color_domain = [entry for entry in color_map if entry in legend_entries]
+        legend_entries.extend(observed_labels)
+        legend_entries = list(dict.fromkeys(legend_entries))
+        color_domain = [entry for entry in legend_entries if entry in color_map]
         color_scale = alt.Scale(domain=color_domain, range=[color_map[e] for e in color_domain])
         base = alt.Chart(df_chart).encode(
             x=alt.X('DateTime:T', title='Date/Time', scale=alt.Scale(domain=[start_date, end_date])),
@@ -602,11 +629,18 @@ def _build_outputs(
         line = base.mark_line()
         layers = [line]
         if has_limits:
-            lo, hi = primary_ranges[name][ch]
+            lo, hi = channel_ranges[ch]
             limits_df = pd.DataFrame({'y': [lo, hi], 'Legend': ['Lower Limit', 'Upper Limit']})
             layers.append(
                 alt.Chart(limits_df)
                 .mark_rule(strokeDash=[4, 4])
+                .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
+            )
+        if observed_records:
+            observed_df = pd.DataFrame(observed_records)
+            layers.append(
+                alt.Chart(observed_df)
+                .mark_rule(strokeDash=[2, 2])
                 .encode(y='y:Q', color=alt.Color('Legend:N', scale=color_scale, legend=None))
             )
         title_lines = [
@@ -621,7 +655,18 @@ def _build_outputs(
         )
         channel_info["chart"] = chart
 
-        ch_lo, ch_hi = primary_ranges[name].get(ch, (None, None))
+        channel_info["stats"] = {
+            "observed_min": float(data_min) if pd.notna(data_min) else None,
+            "observed_max": float(data_max) if pd.notna(data_max) else None,
+            "limit_min": (
+                float(range_tuple[0]) if range_tuple and range_tuple[0] is not None else None
+            ),
+            "limit_max": (
+                float(range_tuple[1]) if range_tuple and range_tuple[1] is not None else None
+            ),
+        }
+
+        ch_lo, ch_hi = channel_ranges.get(ch, (None, None))
         if ch_lo is not None:
             if not merged_df.empty:
                 df_ch = merged_df.rename(columns={"MergedValue": ch}).copy()
@@ -644,6 +689,10 @@ def _build_outputs(
                 channel_info['incident'] = incident
             else:
                 channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)'])
+                channel_info['oor_reason'] = 'No merged data available to evaluate OOR events.'
+        else:
+            channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)'])
+            channel_info['oor_reason'] = 'No limits available for this channel, so OOR events cannot be calculated.'
 
         result["channel_results"][ch] = channel_info
 
@@ -817,6 +866,26 @@ for tab, name in zip(tabs, serial_keys):
                     continue
                 if ch_result.get("chart"):
                     st.altair_chart(ch_result["chart"], use_container_width=True)
+                    stats = ch_result.get("stats") or {}
+                    stat_lines: List[str] = []
+                    observed_min = stats.get("observed_min")
+                    observed_max = stats.get("observed_max")
+                    limit_min = stats.get("limit_min")
+                    limit_max = stats.get("limit_max")
+                    if observed_min is not None and observed_max is not None:
+                        stat_lines.append(
+                            f"Observed range: {observed_min:.2f} to {observed_max:.2f}"
+                        )
+                    if limit_min is not None and limit_max is not None:
+                        stat_lines.append(
+                            f"Limits: {limit_min:.2f} to {limit_max:.2f}"
+                        )
+                    elif limit_min is not None:
+                        stat_lines.append(f"Lower limit: {limit_min:.2f}")
+                    elif limit_max is not None:
+                        stat_lines.append(f"Upper limit: {limit_max:.2f}")
+                    if stat_lines:
+                        st.caption(" | ".join(stat_lines))
                     has_content = True
                 if ch_result.get("oor_table") is not None:
                     st.markdown(f"### {ch} OOR Events")
@@ -827,6 +896,8 @@ for tab, name in zip(tabs, serial_keys):
                         st.write(f"**Incident:** {'YES' if ch_result['incident'] else 'No'}")
                     else:
                         st.info("No out-of-range events detected.")
+                    if ch_result.get("oor_reason"):
+                        st.caption(ch_result["oor_reason"])
                     has_content = True
 
             if has_content and st.button("Save results for this session", key=f"save_{name}"):
@@ -844,6 +915,26 @@ if st.session_state["saved_results"]:
             st.markdown(f"#### {ch}")
             if saved_ch.get("chart"):
                 st.altair_chart(saved_ch["chart"], use_container_width=True)
+                stats = saved_ch.get("stats") or {}
+                stat_lines: List[str] = []
+                observed_min = stats.get("observed_min")
+                observed_max = stats.get("observed_max")
+                limit_min = stats.get("limit_min")
+                limit_max = stats.get("limit_max")
+                if observed_min is not None and observed_max is not None:
+                    stat_lines.append(
+                        f"Observed range: {observed_min:.2f} to {observed_max:.2f}"
+                    )
+                if limit_min is not None and limit_max is not None:
+                    stat_lines.append(
+                        f"Limits: {limit_min:.2f} to {limit_max:.2f}"
+                    )
+                elif limit_min is not None:
+                    stat_lines.append(f"Lower limit: {limit_min:.2f}")
+                elif limit_max is not None:
+                    stat_lines.append(f"Upper limit: {limit_max:.2f}")
+                if stat_lines:
+                    st.caption(" | ".join(stat_lines))
             if saved_ch.get("oor_table") is not None:
                 ev_df = saved_ch["oor_table"]
                 if not ev_df.empty:
@@ -852,3 +943,5 @@ if st.session_state["saved_results"]:
                     st.write(f"**Incident:** {'YES' if saved_ch['incident'] else 'No'}")
                 else:
                     st.info("No out-of-range events detected.")
+                if saved_ch.get("oor_reason"):
+                    st.caption(saved_ch["oor_reason"])
