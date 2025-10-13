@@ -19,7 +19,6 @@ if __package__:
     from .data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
-        TEMP_COL_ALIASES,
         parse_serial_csv,
     )
 else:
@@ -28,7 +27,6 @@ else:
     from data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
-        TEMP_COL_ALIASES,
         parse_serial_csv,
     )
 
@@ -104,8 +102,6 @@ def _apply_profile_override(
 ) -> None:
     temp_range = PROFILE_TEMP_RANGES.get(profile)
     if temp_range:
-        for alias in TEMP_COL_ALIASES:
-            range_map[alias] = temp_range
         for col in df.columns:
             if isinstance(col, str) and 'temp' in col.lower():
                 range_map[col] = temp_range
