@@ -19,6 +19,7 @@ if __package__:
     from .data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
+        TEMP_COL_ALIASES,
         parse_serial_csv,
     )
 else:
@@ -27,6 +28,7 @@ else:
     from data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
+        TEMP_COL_ALIASES,
         parse_serial_csv,
     )
 
@@ -71,6 +73,48 @@ def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]
 def _state_key(prefix: str, identifier: str) -> str:
     digest = hashlib.sha1(identifier.encode('utf-8')).hexdigest()[:10]
     return f"{prefix}_{digest}"
+
+
+PROFILE_OPTIONS = [
+    "Auto",
+    "Fridge",
+    "Freezer",
+    "Olympus",
+    "Olympus Room",
+    "Room",
+]
+
+PROFILE_TEMP_RANGES: Dict[str, Tuple[float, float]] = {
+    "Fridge": (2.0, 8.0),
+    "Freezer": (-35.0, -5.0),
+    "Olympus": (15.0, 28.0),
+    "Olympus Room": (15.0, 25.0),
+    "Room": (15.0, 25.0),
+}
+
+PROFILE_HUMIDITY_RANGES: Dict[str, Tuple[float, float]] = {
+    "Olympus": (0.0, 80.0),
+    "Olympus Room": (0.0, 60.0),
+    "Room": (0.0, 60.0),
+}
+
+
+def _apply_profile_override(
+    range_map: Dict[str, Tuple[float, float]], profile: str, df: pd.DataFrame
+) -> None:
+    temp_range = PROFILE_TEMP_RANGES.get(profile)
+    if temp_range:
+        for alias in TEMP_COL_ALIASES:
+            range_map[alias] = temp_range
+        for col in df.columns:
+            if isinstance(col, str) and 'temp' in col.lower():
+                range_map[col] = temp_range
+
+    humidity_range = PROFILE_HUMIDITY_RANGES.get(profile)
+    if humidity_range:
+        for col in df.columns:
+            if isinstance(col, str) and 'hum' in col.lower():
+                range_map[col] = humidity_range
 
 def _prepare_serial_primary(
     serial_data: Dict[str, Dict[str, object]]
@@ -589,34 +633,25 @@ def _build_outputs(
             color_map[legend] = tempstick_palette[idx % len(tempstick_palette)]
         for idx, legend in enumerate(serial_legends):
             color_map[legend] = serial_palette[idx % len(serial_palette)]
-        acceptable_records: List[Dict[str, float]] = []
-        acceptable_labels: List[str] = []
+        limit_records: List[Dict[str, object]] = []
         if range_tuple:
             lo_val, hi_val = range_tuple
             if lo_val is not None and pd.notna(lo_val):
-                acceptable_records.append({'y': float(lo_val), 'Legend': 'Acceptable Min'})
-                acceptable_labels.append('Acceptable Min')
+                limit_records.append({'y': float(lo_val), 'Legend': 'Lower Limit'})
             if hi_val is not None and pd.notna(hi_val):
-                label = 'Acceptable Max'
-                if acceptable_records and acceptable_records[0]['y'] == float(hi_val):
-                    acceptable_records[0]['Legend'] = 'Acceptable Min/Max'
-                    acceptable_labels = ['Acceptable Min/Max']
-                else:
-                    acceptable_records.append({'y': float(hi_val), 'Legend': label})
-                    acceptable_labels.append(label)
-        for legend in acceptable_labels:
-            if legend not in color_map:
-                if legend.endswith('Max'):
-                    color_map[legend] = '#d62728'
-                elif legend.endswith('Min'):
-                    color_map[legend] = '#1f77b4'
-                else:
-                    color_map[legend] = '#9467bd'
+                limit_records.append({'y': float(hi_val), 'Legend': 'Upper Limit'})
+        for record in limit_records:
+            legend = record['Legend']
+            if legend == 'Lower Limit' and legend not in color_map:
+                color_map[legend] = '#2ca02c'
+            if legend == 'Upper Limit' and legend not in color_map:
+                color_map[legend] = '#d62728'
+
         legend_entries: List[str] = []
         legend_entries.extend(probe_legends)
         legend_entries.extend(tempstick_legends)
         legend_entries.extend(serial_legends)
-        legend_entries.extend(acceptable_labels)
+        legend_entries.extend(record['Legend'] for record in limit_records)
         legend_entries = list(dict.fromkeys(legend_entries))
         color_domain = [entry for entry in legend_entries if entry in color_map]
         color_scale = alt.Scale(domain=color_domain, range=[color_map[e] for e in color_domain])
@@ -637,17 +672,17 @@ def _build_outputs(
         )
         line = base.mark_line()
         layers = [line]
-        if acceptable_records:
-            acceptable_df = pd.DataFrame(acceptable_records)
+        if limit_records:
+            limits_df = pd.DataFrame(limit_records)
             layers.append(
-                alt.Chart(acceptable_df)
+                alt.Chart(limits_df)
                 .mark_rule(strokeDash=[4, 4])
                 .encode(
                     y='y:Q',
                     color=alt.Color('Legend:N', scale=color_scale),
                 )
             )
-            legend_seed = acceptable_df[['Legend']].drop_duplicates().copy()
+            legend_seed = limits_df[['Legend']].drop_duplicates().copy()
             legend_seed['x'] = start_date
             legend_seed['y'] = ymin
             layers.append(
@@ -737,6 +772,17 @@ for tab, name in zip(tabs, serial_keys):
         equip_id_key = f"equip_{name}"
         equip_id = st.text_input("Equipment ID", key=equip_id_key)
 
+        base_range_map = copy.deepcopy(primary_ranges.get(name, {}))
+        profile_override_key = f"profile_override_{name}"
+        forced_profile = st.selectbox(
+            "Profile override",
+            options=PROFILE_OPTIONS,
+            key=profile_override_key,
+            help="Override automatic limit detection if detection fails.",
+        )
+        if forced_profile != "Auto":
+            _apply_profile_override(base_range_map, forced_profile, df)
+
         st.markdown("### Optional Overlays")
         assigned_probes = [
             probe_name
@@ -816,7 +862,7 @@ for tab, name in zip(tabs, serial_keys):
         }
         comparison_probes = list(comparison_options.keys())
 
-        channel_defaults = list(primary_ranges.get(name, {}).keys())
+        channel_defaults = [col for col in base_range_map if col in df.columns]
         if not channel_defaults:
             channel_defaults = [
                 col
@@ -839,6 +885,8 @@ for tab, name in zip(tabs, serial_keys):
             materials_value = materials or ""
             probe_id_value = probe_id or ""
             equip_id_value = equip_id or ""
+            effective_ranges = copy.deepcopy(primary_ranges)
+            effective_ranges[name] = base_range_map
             result = _build_outputs(
                 name,
                 chart_title_value,
@@ -855,7 +903,7 @@ for tab, name in zip(tabs, serial_keys):
                 tempdfs,
                 tempstick_labels,
                 selected_tempsticks,
-                primary_ranges,
+                effective_ranges,
                 materials_value,
                 probe_id_value,
                 equip_id_value,

@@ -8,6 +8,49 @@ import pandas as pd
 
 _ZERO_WIDTH_CHARS = ("\ufeff", "\u200b", "\u200c", "\u200d")
 
+TEMP_COL_ALIASES = ["Temperature", "Temp", "Temp (°C)", "Temperature (°C)"]
+
+
+def _infer_profile_from_name(*candidates: Optional[str]) -> Optional[str]:
+    """Infer a fridge/freezer profile from a collection of text hints."""
+
+    pieces: List[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        pieces.append(str(candidate))
+    if not pieces:
+        return None
+    text = " ".join(pieces).lower()
+    if "freezer" in text:
+        return "freezer"
+    if "fridge" in text or "refrigerator" in text:
+        return "fridge"
+    return None
+
+
+def _default_temp_range_for(profile: str) -> Optional[Tuple[float, float]]:
+    if profile == "freezer":
+        return (-35.0, -5.0)
+    if profile == "fridge":
+        return (2.0, 8.0)
+    return None
+
+
+def _apply_inferred_temperature_range(
+    range_map: Dict[str, Tuple[float, float]], *name_hints: Optional[str]
+) -> None:
+    """Populate range_map with inferred temperature ranges for known aliases."""
+
+    profile = _infer_profile_from_name(*name_hints)
+    if not profile:
+        return
+    default_range = _default_temp_range_for(profile)
+    if not default_range:
+        return
+    for alias in TEMP_COL_ALIASES:
+        range_map[alias] = default_range
+
 
 def _strip_bom_and_zero_width(text: str) -> str:
     for ch in _ZERO_WIDTH_CHARS:
@@ -229,7 +272,10 @@ def _parse_traceable_report_csv(
 
     context = _normalise_context_text(source_name, meta.get("device_name"))
     temp_range = _infer_temperature_range(context, default_temp_range)
-    range_map = {"Temperature": temp_range}
+    range_map: Dict[str, Tuple[float, float]] = {"Temperature": temp_range}
+    _apply_inferred_temperature_range(
+        range_map, source_name, meta.get("device_name"), device_id
+    )
 
     return [
         {
@@ -427,9 +473,17 @@ def _parse_consolidated_serial_text(
         finalized = _finalize_serial_dataframe(combined)
         if finalized.empty:
             continue
+        range_map = dict(bucket.get('range_map', {}))
+        _apply_inferred_temperature_range(
+            range_map,
+            bucket.get('source_name', name),
+            bucket.get('serial', ''),
+            bucket.get('default_label', ''),
+            bucket.get('option_label', ''),
+        )
         results[key] = {
             'df': finalized,
-            'range_map': bucket.get('range_map', {}),
+            'range_map': range_map,
             'serial': bucket.get('serial', ''),
             'default_label': bucket.get('default_label', ''),
             'option_label': bucket.get('option_label', ''),
@@ -704,6 +758,10 @@ def _process_new_schema_df(
         if 'Humidity' in ordered_cols:
             range_map['Humidity'] = default_humidity_range
             channels.append('Humidity')
+
+        _apply_inferred_temperature_range(
+            range_map, name, display_name, space_name, space_type, serial
+        )
 
         default_label = display_name or serial or Path(name).stem
         option_label = ''
