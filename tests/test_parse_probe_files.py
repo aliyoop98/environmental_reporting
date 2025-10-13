@@ -88,7 +88,9 @@ def test_parse_consolidated_probe_file_with_space_assignments():
     assert list(df_equipment.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
     assert list(df_ambient.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
 
-    assert ranges[equipment_key]["Temperature"] == (15, 25)
+    assert ranges[equipment_key]["Temperature"] == (-35, -5)
+    assert ranges[equipment_key]["Humidity"] == (0, 60)
+    assert ranges[ambient_key]["Temperature"] == (-35, -5)
     assert ranges[ambient_key]["Humidity"] == (0, 60)
 
 

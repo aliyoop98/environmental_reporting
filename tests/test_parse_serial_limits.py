@@ -29,3 +29,22 @@ def test_traceable_report_infers_freezer_limits():
     range_map = info.get("range_map")
     assert isinstance(range_map, dict)
     assert range_map.get("Temperature") == (-35, -5)
+
+
+def test_consolidated_serial_uses_space_type_keyword_for_limits():
+    csv_text = (
+        "Timestamp,Serial Number,Channel,Data,Unit of Measure,Space Type\n"
+        "2024-01-01 00:00:00,SN-001,Temperature,-25,°C,Freezer\n"
+    )
+
+    serials = parse_serial_csv([_BytesFile(csv_text, name="consolidated.csv")])
+    assert serials
+
+    info = next(iter(serials.values()))
+    df = info.get("df")
+    assert isinstance(df, pd.DataFrame)
+    assert not df.empty
+
+    range_map = info.get("range_map")
+    assert isinstance(range_map, dict)
+    assert range_map.get("Temperature") == (-35, -5)

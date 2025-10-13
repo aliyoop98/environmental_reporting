@@ -693,10 +693,13 @@ def _process_new_schema_df(
         label_prefix = name if not display_name else f"{name} - {display_name}"
         label = f"{label_prefix} [{serial}]" if serial else label_prefix
 
+        context = _normalise_context_text(name, display_name, space_name, space_type)
+        inferred_temp_range = _infer_temperature_range(context, default_temp_range)
+
         range_map: Dict[str, Tuple[float, float]] = {}
         channels: List[str] = []
         if 'Temperature' in ordered_cols:
-            range_map['Temperature'] = default_temp_range
+            range_map['Temperature'] = inferred_temp_range
             channels.append('Temperature')
         if 'Humidity' in ordered_cols:
             range_map['Humidity'] = default_humidity_range
