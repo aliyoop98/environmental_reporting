@@ -36,7 +36,7 @@ st.markdown(
     """
     <style>
         .stApp { background-color: white; }
-        [data-testid="stSidebar"] { background-color: blue; }
+        [data-testid="stSidebar"] { background-color: light blue; }
     </style>
     """,
     unsafe_allow_html=True,
