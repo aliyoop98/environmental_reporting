@@ -605,7 +605,25 @@ def _build_outputs(
             return series
 
         merged = _coalesce(piv, list(dict.fromkeys(priority_order))).rename("MergedValue")
-        merged_df = merged.reset_index().dropna(subset=["MergedValue"])
+
+        merged_sources = pd.Series(index=piv.index, dtype="object")
+        for legend in dict.fromkeys(priority_order):
+            if legend not in piv.columns:
+                continue
+            mask = piv[legend].notna() & merged_sources.isna()
+            if mask.any():
+                merged_sources.loc[mask] = legend
+
+        merged_df = (
+            pd.DataFrame(
+                {
+                    "DateTime": merged.index,
+                    "MergedValue": merged.values,
+                    "Source": merged_sources.reindex(merged.index).values,
+                }
+            )
+            .dropna(subset=["MergedValue"])
+        )
 
         data_min = df_chart['Value'].min()
         data_max = df_chart['Value'].max()
@@ -735,18 +753,24 @@ def _build_outputs(
                     if pd.isna(end) and pd.notna(med_step):
                         end = grp['DateTime'].iloc[-1] + pd.to_timedelta(med_step, unit='m')
                     duration = float(grp['dur_min'].sum())
-                    events.append({'Start': start, 'End': end, 'Duration(min)': duration})
-                ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)'])
+                    mode_source = grp['Source'].mode(dropna=True)
+                    if not mode_source.empty:
+                        source_label = mode_source.iloc[0]
+                    else:
+                        non_na_sources = grp['Source'].dropna()
+                        source_label = non_na_sources.iloc[0] if not non_na_sources.empty else primary_legend
+                    events.append({'Start': start, 'End': end, 'Duration(min)': duration, 'Source': source_label})
+                ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)', 'Source'])
                 channel_info['oor_table'] = ev_df
                 total = float(ev_df['Duration(min)'].sum()) if not ev_df.empty else 0.0
                 incident = bool(total >= 60 or (not ev_df.empty and ev_df['Duration(min)'].max() > 60))
                 channel_info['total_minutes'] = total
                 channel_info['incident'] = incident
             else:
-                channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)'])
+                channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)', 'Source'])
                 channel_info['oor_reason'] = 'No merged data available to evaluate OOR events.'
         else:
-            channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)'])
+            channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)', 'Source'])
             channel_info['oor_reason'] = 'No limits available for this channel, so OOR events cannot be calculated.'
 
         result["channel_results"][ch] = channel_info
@@ -959,9 +983,73 @@ for tab, name in zip(tabs, serial_keys):
                     st.markdown(f"### {ch} OOR Events")
                     ev_df = ch_result["oor_table"]
                     if not ev_df.empty:
-                        st.table(ev_df)
-                        st.write(f"**Total OOR minutes:** {ch_result['total_minutes']:.1f}")
-                        st.write(f"**Incident:** {'YES' if ch_result['incident'] else 'No'}")
+                        selection_key = _state_key("oor_exclusions", f"{name}|{ch}")
+                        st.markdown("#### OOR Event Selection")
+                        ev_df_display = ev_df.copy()
+                        ev_df_display["Include"] = True
+
+                        if selection_key not in st.session_state:
+                            st.session_state[selection_key] = ev_df_display["Include"].tolist()
+
+                        includes: List[bool] = []
+                        for idx, row in ev_df_display.iterrows():
+                            previous = (
+                                st.session_state[selection_key][idx]
+                                if idx < len(st.session_state[selection_key])
+                                else True
+                            )
+                            checkbox_label = (
+                                f"{row['Source']} | {row['Start']} → {row['End']} "
+                                f"({row['Duration(min)']:.1f} min)"
+                            )
+                            checked = st.checkbox(
+                                checkbox_label,
+                                value=previous,
+                                key=f"{selection_key}_row_{idx}",
+                            )
+                            includes.append(checked)
+
+                        ev_df_display["Include"] = includes
+                        st.session_state[selection_key] = includes
+
+                        included_df = ev_df_display[ev_df_display["Include"]]
+                        total_included = (
+                            included_df["Duration(min)"].sum() if not included_df.empty else 0.0
+                        )
+                        incident_included = bool(
+                            total_included >= 60
+                            or (
+                                not included_df.empty
+                                and included_df["Duration(min)"].max() > 60
+                            )
+                        )
+
+                        st.write(f"**Total Included OOR minutes:** {total_included:.1f}")
+                        st.write(f"**Incident:** {'YES' if incident_included else 'No'}")
+
+                        included_table = included_df.drop(columns=["Include"])
+                        if not included_table.empty:
+                            st.dataframe(included_table)
+                        else:
+                            st.info("All OOR events are currently excluded.")
+
+                        download_df = included_table.copy()
+                        csv_bytes = download_df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "Download included OOR events (CSV)",
+                            data=csv_bytes,
+                            file_name=f"{name}_{ch}_oor_events.csv",
+                            mime="text/csv",
+                            key=f"download_{selection_key}",
+                            disabled=download_df.empty,
+                        )
+
+                        if len(included_df) != len(ev_df_display):
+                            excluded_table = ev_df_display[~ev_df_display["Include"]][
+                                ["Source", "Start", "End", "Duration(min)"]
+                            ]
+                            with st.expander("Excluded events"):
+                                st.dataframe(excluded_table)
                     else:
                         st.info("No out-of-range events detected.")
                     if ch_result.get("oor_reason"):
