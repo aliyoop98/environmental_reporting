@@ -719,15 +719,22 @@ def _build_outputs(
             if not merged_df.empty:
                 df_ch = merged_df.rename(columns={"MergedValue": ch}).copy()
                 df_ch = df_ch.sort_values("DateTime").drop_duplicates(subset=["DateTime"])
-                df_ch['OOR'] = df_ch[ch].apply(lambda v: pd.notna(v) and (v < ch_lo or v > ch_hi))
-                df_ch['Group'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
+                df_ch['OOR'] = (df_ch[ch] < ch_lo) | (df_ch[ch] > ch_hi)
+                df_ch['next_dt'] = df_ch['DateTime'].shift(-1)
+                med_step = (
+                    df_ch['DateTime'].diff().dt.total_seconds().div(60).median()
+                )
+                df_ch['dur_min'] = (
+                    (df_ch['next_dt'] - df_ch['DateTime']).dt.total_seconds().div(60)
+                ).fillna(med_step).clip(lower=0)
+                df_ch['blk'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
                 events = []
-                for _, grp in df_ch.groupby('Group'):
-                    if not grp['OOR'].iloc[0]:
-                        continue
+                for _, grp in df_ch[df_ch['OOR']].groupby('blk'):
                     start = grp['DateTime'].iloc[0]
-                    end = grp['DateTime'].iloc[-1]
-                    duration = max((end - start).total_seconds() / 60, 0)
+                    end = grp['next_dt'].iloc[-1]
+                    if pd.isna(end) and pd.notna(med_step):
+                        end = grp['DateTime'].iloc[-1] + pd.to_timedelta(med_step, unit='m')
+                    duration = float(grp['dur_min'].sum())
                     events.append({'Start': start, 'End': end, 'Duration(min)': duration})
                 ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)'])
                 channel_info['oor_table'] = ev_df
