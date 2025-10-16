@@ -19,7 +19,33 @@ PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
     "Fridge": {"temp": (2.0, 8.0), "humi": None},
     "Room": {"temp": (15.0, 25.0), "humi": (0.0, 60.0)},
     "Area": {"temp": (15.0, 25.0), "humi": (0.0, 60.0)},
+    "Olympus": {"temp": (15.0, 28.0), "humi": (0.0, 80.0)},
+    "Olympus Room": {"temp": (15.0, 28.0), "humi": (0.0, 80.0)},
 }
+
+
+def _parse_ts(value: object) -> pd.Timestamp:
+    """Return a normalized timestamp using deterministic formats first."""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return pd.NaT
+
+    text = str(value).strip()
+    if not text:
+        return pd.NaT
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+    ):
+        try:
+            return pd.to_datetime(text, format=fmt)
+        except Exception:
+            continue
+
+    return pd.to_datetime(text, errors="coerce")
 
 
 def _infer_profile_from_name(*candidates: Optional[str]) -> Optional[str]:
@@ -52,12 +78,8 @@ def _apply_inferred_ranges(
     if not limits:
         limits = {"temp": None, "humi": DEFAULT_HUMIDITY_RANGE}
 
-    temp_range = limits.get("temp")
-    if temp_range is None:
-        temp_range = range_map.get("Temperature")
-    humidity_range = limits.get("humi")
-    if humidity_range is None:
-        humidity_range = range_map.get("Humidity", DEFAULT_HUMIDITY_RANGE)
+    temp_range = limits.get("temp") or range_map.get("Temperature") or DEFAULT_TEMP_RANGE
+    humidity_range = limits.get("humi") or range_map.get("Humidity") or DEFAULT_HUMIDITY_RANGE
 
     if temp_range:
         for alias in TEMP_COL_ALIASES:
@@ -144,13 +166,14 @@ def merge_serial_data(
 
 def _extract_report_blocks(
     text: str,
-) -> Optional[Tuple[Dict[str, Optional[str]], List[List[str]]]]:
-    """Return metadata and all channel data blocks from a Traceable report."""
+) -> Optional[Tuple[Dict[str, Optional[str]], List[Tuple[str, str]]]]:
+    """Return metadata and per-channel CSV blocks from a Traceable report."""
 
     if not text:
         return None
 
-    lines = [_strip_bom_and_zero_width(line) for line in text.splitlines()]
+    lines = [line.replace("\ufeff", "") for line in text.splitlines()]
+    lines = [_strip_bom_and_zero_width(line) for line in lines]
     if not any(line.lstrip().lower().startswith("device id:") for line in lines):
         return None
 
@@ -170,41 +193,43 @@ def _extract_report_blocks(
     header_indexes = [
         idx
         for idx, line in enumerate(lines)
-        if line.strip().lower().startswith("timestamp")
-        and "data" in line.lower()
-        and "range" in line.lower()
+        if line.strip().lower().startswith("timestamp,") and "data" in line.lower()
     ]
     if not header_indexes:
         return None
 
-    blocks: List[List[str]] = []
+    blocks: List[Tuple[str, str]] = []
     for start in header_indexes:
         end = len(lines)
         for pos in range(start + 1, len(lines)):
             stripped = lines[pos].strip()
             lowered = stripped.lower()
-            if lowered.startswith("channel data for"):
+            if lowered.startswith("channel data for") and pos > start:
                 end = pos
                 break
-            if (
-                lowered.startswith("timestamp")
-                and "data" in lowered
-                and "range" in lowered
-            ):
+            if pos in header_indexes and pos > start:
                 end = pos
                 break
 
-        block: List[str] = []
-        for row in lines[start:end]:
-            if not block:
-                block.append(row)
-                continue
+        header = lines[start]
+        block_lines = [header]
+        for row in lines[start + 1 : end]:
             if not row.strip():
                 continue
-            block.append(row)
+            block_lines.append(row)
 
-        if len(block) > 1:
-            blocks.append(block)
+        if len(block_lines) <= 1:
+            continue
+
+        context_label = ""
+        for offset in range(start - 1, -1, -1):
+            candidate = lines[offset].strip()
+            if not candidate:
+                continue
+            context_label = candidate
+            break
+
+        blocks.append((context_label, "\n".join(block_lines)))
 
     if not blocks:
         return None
@@ -266,14 +291,19 @@ def _parse_traceable_report_csv(
 
     meta, blocks = extracted
     frames: List[pd.DataFrame] = []
-    for block in blocks:
-        csv_text = "\n".join(block)
+    for label, csv_text in blocks:
         try:
-            frame = pd.read_csv(io.StringIO(csv_text), engine="python")
+            frame = pd.read_csv(
+                io.StringIO(csv_text),
+                engine="python",
+                on_bad_lines="skip",
+            )
         except Exception:
             continue
         if frame.empty:
             continue
+        frame = _clean_chunk_columns(frame)
+        frame["__block_label"] = label
         frames.append(frame)
 
     if not frames:
@@ -291,44 +321,79 @@ def _parse_traceable_report_csv(
 
     df = df.rename(columns={timestamp_col: "Timestamp", data_col: "Data"})
 
-    def _to_temp_c(value: object) -> object:
-        if isinstance(value, (int, float)) and not pd.isna(value):
-            return float(value)
-        if not isinstance(value, str):
-            return pd.NA
-        text_value = _strip_bom_and_zero_width(value).strip()
-        if not text_value:
-            return pd.NA
-        lower = text_value.lower()
-        if "f" in lower and "c" not in lower:
-            return pd.NA
-        cleaned = (
-            text_value.replace("°", "")
-            .replace("deg", "")
-            .replace("degree", "")
-            .replace("celsius", "")
-            .replace("Celsius", "")
-        )
-        cleaned = cleaned.replace(" c", "c").replace(" C", "c")
-        match = re.search(r"(-?\d+(?:\.\d+)?)", cleaned)
-        if not match:
-            return pd.NA
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return pd.NA
+    data_cleaned = (
+        df["Data"].astype("string")
+        .str.replace(r"[^0-9\.\-]", "", regex=True)
+        .replace({"": pd.NA})
+    )
+    df["Value"] = pd.to_numeric(data_cleaned, errors="coerce")
+    df["DateTime"] = df["Timestamp"].apply(_parse_ts)
 
-    out = pd.DataFrame()
-    out["DateTime"] = pd.to_datetime(df["Timestamp"], errors="coerce")
-    out["Temperature"] = pd.to_numeric(df["Data"].apply(_to_temp_c), errors="coerce")
-    out = out.dropna(subset=["DateTime", "Temperature"], how="any")
-    if out.empty:
+    if "Channel" in df.columns:
+        df["Channel"] = df["Channel"].astype("string").str.strip()
+    else:
+        df["Channel"] = ""
+
+    def _infer_block_channel(label: str) -> Optional[str]:
+        text = (label or "").lower()
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        text = " ".join(text.split())
+        if not text:
+            return None
+        if "sensor" in text:
+            tokens = text.split()
+            for idx, token in enumerate(tokens):
+                if token == "sensor" and idx + 1 < len(tokens):
+                    sensor_id = tokens[idx + 1]
+                    if sensor_id in {"1", "01"}:
+                        return "Humidity"
+                    if sensor_id in {"2", "02"}:
+                        return "Temperature"
+        if any(term in text for term in ("humidity", "humid", "rh")):
+            return "Humidity"
+        if any(term in text for term in ("temp", "temperature", "°c", "°f")):
+            return "Temperature"
+        return None
+
+    block_labels = df.pop("__block_label") if "__block_label" in df.columns else pd.Series()
+    if not block_labels.empty:
+        inferred = block_labels.apply(_infer_block_channel)
+        df["Channel"] = df["Channel"].where(df["Channel"].astype(str).str.strip().astype(bool), None)
+        df["Channel"] = df["Channel"].where(df["Channel"].notna(), inferred)
+    df["Channel"] = df["Channel"].fillna("")
+    if len(blocks) == 1:
+        mask_blank = df["Channel"].astype(str).str.strip() == ""
+        if mask_blank.any():
+            df.loc[mask_blank, "Channel"] = "Temperature"
+
+    df = df.dropna(subset=["DateTime", "Value"], how="any")
+    df = df[df["Channel"].astype(str).str.strip() != ""]
+    if df.empty:
         return []
 
-    out["Date"] = out["DateTime"].dt.date
-    out["Time"] = out["DateTime"].dt.strftime("%H:%M")
-    out = out[["DateTime", "Date", "Time", "Temperature"]]
-    out = _finalize_serial_dataframe(out)
+    df = df[df["Channel"].isin({"Temperature", "Humidity"})]
+    if df.empty:
+        return []
+
+    wide = (
+        df.pivot_table(
+            index="DateTime",
+            columns="Channel",
+            values="Value",
+            aggfunc="mean",
+        )
+        .reset_index()
+        .rename_axis(None, axis=1)
+        .sort_values("DateTime")
+    )
+
+    for col in ("Temperature", "Humidity"):
+        if col not in wide.columns:
+            wide[col] = pd.NA
+
+    wide["Date"] = wide["DateTime"].dt.date
+    wide["Time"] = wide["DateTime"].dt.strftime("%H:%M")
+    out = _finalize_serial_dataframe(wide)
 
     device_id = (meta.get("device_id") or "").strip()
     serial = device_id
@@ -342,6 +407,8 @@ def _parse_traceable_report_csv(
     range_map.setdefault("Humidity", DEFAULT_HUMIDITY_RANGE)
     _apply_inferred_ranges(range_map, source_name, meta.get("device_name"), device_id)
 
+    channels = [col for col in ("Temperature", "Humidity") if col in out.columns]
+
     return [
         {
             "key": key,
@@ -351,7 +418,7 @@ def _parse_traceable_report_csv(
             "default_label": default_label,
             "option_label": "",
             "source_name": source_name,
-            "channels": ["Temperature"],
+            "channels": channels,
         }
     ]
 
@@ -465,17 +532,30 @@ def _parse_consolidated_serial_text(
     default_humidity_range: Tuple[float, float],
 ) -> Dict[str, Dict[str, object]]:
     cleaned_text = _strip_bom_and_zero_width(text)
-    attempts = ({"sep": None, "engine": "python"}, {"engine": "python"})
+    attempts = ({"sep": None}, {})
+    base_read_csv_options = {
+        "chunksize": 50_000,
+        "index_col": False,
+        "engine": "python",
+        "on_bad_lines": "skip",
+        "skip_blank_lines": True,
+        "dtype": {
+            "Timestamp": "string",
+            "Serial Number": "string",
+            "Channel": "string",
+            "Data": "string",
+            "Unit of Measure": "string",
+        },
+        "keep_default_na": False,
+        "low_memory": False,
+    }
     aggregated: Dict[str, Dict[str, object]] = {}
 
     for kwargs in attempts:
         try:
             reader = pd.read_csv(
                 io.StringIO(cleaned_text),
-                chunksize=50_000,
-                index_col=False,
-                on_bad_lines="skip",
-                **kwargs,
+                **{**base_read_csv_options, **kwargs},
             )
             first_chunk = next(reader)
         except StopIteration:
@@ -713,19 +793,65 @@ def _process_new_schema_df(
         for original, canonical_name in canonical_map.items()
     }
     df_new = df_new.rename(columns=canonical)
-    df_new['Timestamp'] = pd.to_datetime(
-        df_new['Timestamp'], errors='coerce'
+
+    for column in ["Timestamp", "Serial Number", "Channel", "Data", "Unit of Measure"]:
+        if column not in df_new.columns:
+            if column == "Unit of Measure":
+                df_new[column] = pd.Series(["" for _ in range(len(df_new))], index=df_new.index, dtype="string")
+            else:
+                df_new[column] = pd.Series(pd.NA, index=df_new.index, dtype="string")
+        df_new[column] = df_new[column].astype("string")
+
+    df_new["Serial Number"] = df_new["Serial Number"].str.strip()
+    df_new["Channel"] = df_new["Channel"].str.strip()
+    df_new["Unit of Measure"] = df_new["Unit of Measure"].fillna("").str.strip()
+
+    df_new["DateTime"] = df_new["Timestamp"].apply(_parse_ts)
+    df_new = df_new.dropna(subset=["DateTime"])
+    df_new = df_new[df_new["Serial Number"].astype(str).str.strip() != ""]
+
+    cleaned_values = (
+        df_new["Data"]
+        .astype("string")
+        .str.replace(r"[^0-9\.\-]", "", regex=True)
+        .replace({"": pd.NA})
     )
-    df_new['Serial Number'] = (
-        df_new['Serial Number'].astype(str).str.strip()
+    df_new["Value"] = pd.to_numeric(cleaned_values, errors="coerce")
+    df_new = df_new.dropna(subset=["Value"])
+
+    channel_original = df_new["Channel"].fillna("")
+    unit_original = df_new["Unit of Measure"].fillna("")
+    measurement_series = pd.Series(
+        [_classify_measurement(ch, unit) for ch, unit in zip(channel_original, unit_original)],
+        index=df_new.index,
+        dtype="object",
     )
-    df_new['Channel'] = df_new['Channel'].astype(str)
-    if 'Unit of Measure' in df_new.columns:
-        df_new['Unit of Measure'] = df_new['Unit of Measure'].astype(str)
-    else:
-        df_new['Unit of Measure'] = ''
-    df_new = df_new.dropna(subset=['Timestamp', 'Serial Number'])
-    df_new['Data'] = pd.to_numeric(df_new['Data'], errors='coerce')
+    sensor_map = {
+        "sensor1": "Humidity",
+        "sensor 1": "Humidity",
+        "sensor01": "Humidity",
+        "sensor 01": "Humidity",
+        "sensor2": "Temperature",
+        "sensor 2": "Temperature",
+        "sensor02": "Temperature",
+        "sensor 02": "Temperature",
+    }
+    direct_channel_map = {
+        "humidity": "Humidity",
+        "relative humidity": "Humidity",
+        "rh": "Humidity",
+        "temperature": "Temperature",
+        "temp": "Temperature",
+    }
+    channel_lower = channel_original.astype(str).str.lower()
+    df_new["Channel"] = channel_lower.map(sensor_map)
+    df_new["Channel"] = df_new["Channel"].where(df_new["Channel"].notna(), measurement_series)
+    df_new["Channel"] = df_new["Channel"].where(
+        df_new["Channel"].notna(), channel_lower.map(direct_channel_map)
+    )
+    df_new["Channel"] = df_new["Channel"].where(df_new["Channel"].notna(), channel_original)
+    df_new["Channel"] = df_new["Channel"].astype("string").str.strip()
+    df_new = df_new[df_new["Channel"] != ""]
     if df_new.empty:
         return []
 
@@ -755,45 +881,32 @@ def _process_new_schema_df(
         space_name = str(key_map.get('_SpaceName', '')).strip()
         space_type = str(key_map.get('_SpaceType', '')).strip()
         sdf = sdf.copy()
-        channel_lower = (
-            sdf['Channel']
-            .astype(str)
-            .str.strip()
-            .str.lower()
-        )
-        saw_sensor1 = channel_lower.isin({'sensor1', 'sensor 1'}).any()
-        saw_sensor2 = channel_lower.isin({'sensor2', 'sensor 2'}).any()
-        sensor_map = {
+        sdf = sdf.dropna(subset=['DateTime', 'Value'])
+        if sdf.empty:
+            continue
+        sdf['Channel'] = sdf['Channel'].astype('string').str.strip()
+        sdf = sdf[sdf['Channel'] != '']
+        if sdf.empty:
+            continue
+        channel_lower = sdf['Channel'].str.lower()
+        saw_sensor1 = channel_lower.isin({'sensor1', 'sensor 1', 'humidity'}).any()
+        saw_sensor2 = channel_lower.isin({'sensor2', 'sensor 2', 'temperature'}).any()
+        sensor_alias_map = {
             'sensor1': 'Humidity',
             'sensor 1': 'Humidity',
             'sensor2': 'Temperature',
             'sensor 2': 'Temperature',
         }
-        measurement = sdf.apply(
-            lambda row: _classify_measurement(
-                row.get('Channel'), row.get('Unit of Measure')
-            ),
-            axis=1,
-        )
-        measurement = measurement.fillna(channel_lower.map(sensor_map))
-        direct_channel_map = {
-            'humidity': 'Humidity',
-            'relative humidity': 'Humidity',
-            'rh': 'Humidity',
-            'temperature': 'Temperature',
-            'temp': 'Temperature',
-        }
-        measurement = measurement.fillna(channel_lower.map(direct_channel_map))
-        sdf['Channel'] = measurement
-        sdf = sdf.dropna(subset=['Channel'])
+        sdf['Channel'] = channel_lower.map(sensor_alias_map).fillna(sdf['Channel'])
+        sdf = sdf[sdf['Channel'].astype(str).str.strip() != '']
         if sdf.empty:
             continue
-        sdf = sdf.sort_values('Timestamp')
+        sdf = sdf.sort_values('DateTime')
         pivot = sdf.pivot_table(
-            index='Timestamp',
+            index='DateTime',
             columns='Channel',
-            values='Data',
-            aggfunc='last',
+            values='Value',
+            aggfunc='mean',
         )
         if pivot.empty:
             continue
@@ -812,12 +925,16 @@ def _process_new_schema_df(
                 pivot[col] = pd.NA
         pivot['DateTime'] = pivot.index
         pivot['Date'] = pivot['DateTime'].dt.date
-        pivot['Time'] = pivot['DateTime'].dt.strftime('%H:%M:%S')
+        pivot['Time'] = pivot['DateTime'].dt.strftime('%H:%M')
         ordered_cols = ['Date', 'Time', 'DateTime']
-        for col in ['Temperature', 'Humidity']:
-            if col in pivot.columns:
-                ordered_cols.append(col)
+        data_columns = [
+            col for col in pivot.columns if col not in {'Date', 'Time', 'DateTime'}
+        ]
+        ordered_cols.extend(data_columns)
         pivot = pivot[ordered_cols].reset_index(drop=True)
+        pivot = _finalize_serial_dataframe(pivot)
+        if pivot.empty:
+            continue
         display_name = ''
         if space_name and space_type:
             display_name = f"{space_name} ({space_type})"
@@ -834,12 +951,13 @@ def _process_new_schema_df(
 
         range_map: Dict[str, Tuple[float, float]] = {}
         channels: List[str] = []
-        if 'Temperature' in ordered_cols:
+        if 'Temperature' in pivot.columns:
             range_map['Temperature'] = inferred_temp_range
             channels.append('Temperature')
-        if 'Humidity' in ordered_cols:
+        if 'Humidity' in pivot.columns:
             range_map['Humidity'] = default_humidity_range
-            channels.append('Humidity')
+            if pivot['Humidity'].notna().any():
+                channels.append('Humidity')
 
         range_map.setdefault('Humidity', DEFAULT_HUMIDITY_RANGE)
         _apply_inferred_ranges(
