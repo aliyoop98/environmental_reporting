@@ -214,7 +214,10 @@ def _prepare_serial_primary(
             combined['DateTime'] = pd.to_datetime(combined['DateTime'], errors='coerce')
             combined = combined.dropna(subset=['DateTime'])
             combined = combined.sort_values('DateTime')
-            combined = combined.drop_duplicates(subset=['DateTime'], keep='last')
+            combined = (
+                combined.groupby('DateTime', as_index=False, sort=True)
+                .agg({col: 'last' for col in combined.columns if col != 'DateTime'})
+            )
             combined['Date'] = combined['DateTime'].dt.date
             combined['Time'] = combined['DateTime'].dt.strftime('%H:%M')
         if 'Date' in combined.columns:
@@ -585,6 +588,8 @@ def _build_outputs(
         result["warnings"].append("No data for selected period.")
         return result
 
+    # Keep raw for OOR math; only downsample the copy used for charting
+    sel_raw = sel_full
     sel = _downsample(sel_full)
 
     start_date = datetime(year, month, 1)
@@ -608,6 +613,14 @@ def _build_outputs(
             channel_info["warning"] = f"Channel {ch} not found in data."
             result["channel_results"][ch] = channel_info
             continue
+
+        if ch in sel_raw.columns:
+            st.write(
+                "DEBUG RH raw max/min for",
+                ch,
+                sel_raw[ch].min(),
+                sel_raw[ch].max(),
+            )
 
         series_frames = []
         probe_legends = []
@@ -847,41 +860,61 @@ def _build_outputs(
 
         ch_lo, ch_hi = channel_ranges.get(ch, (None, None))
         if ch_lo is not None:
-            if not merged_df.empty:
-                df_ch = merged_df.rename(columns={"MergedValue": ch}).copy()
-                df_ch = df_ch.sort_values("DateTime").drop_duplicates(subset=["DateTime"])
-                df_ch['OOR'] = (df_ch[ch] < ch_lo) | (df_ch[ch] > ch_hi)
-                df_ch['next_dt'] = df_ch['DateTime'].shift(-1)
-                med_step = (
-                    df_ch['DateTime'].diff().dt.total_seconds().div(60).median()
+            base = sel_raw[["DateTime", ch]].dropna().copy()
+            if base.empty:
+                channel_info['oor_table'] = pd.DataFrame(
+                    columns=['Start', 'End', 'Duration(min)', 'Source']
                 )
-                df_ch['dur_min'] = (
-                    (df_ch['next_dt'] - df_ch['DateTime']).dt.total_seconds().div(60)
-                ).fillna(med_step).clip(lower=0)
-                df_ch['blk'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
-                events = []
-                for _, grp in df_ch[df_ch['OOR']].groupby('blk'):
-                    start = grp['DateTime'].iloc[0]
-                    end = grp['next_dt'].iloc[-1]
-                    if pd.isna(end) and pd.notna(med_step):
-                        end = grp['DateTime'].iloc[-1] + pd.to_timedelta(med_step, unit='m')
-                    duration = float(grp['dur_min'].sum())
-                    mode_source = grp['Source'].mode(dropna=True)
-                    if not mode_source.empty:
-                        source_label = mode_source.iloc[0]
-                    else:
-                        non_na_sources = grp['Source'].dropna()
-                        source_label = non_na_sources.iloc[0] if not non_na_sources.empty else primary_legend
-                    events.append({'Start': start, 'End': end, 'Duration(min)': duration, 'Source': source_label})
-                ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)', 'Source'])
-                channel_info['oor_table'] = ev_df
-                total = float(ev_df['Duration(min)'].sum()) if not ev_df.empty else 0.0
-                incident = bool(total >= 60 or (not ev_df.empty and ev_df['Duration(min)'].max() > 60))
-                channel_info['total_minutes'] = total
-                channel_info['incident'] = incident
+                channel_info['oor_reason'] = 'No raw data available to evaluate OOR events.'
+                result["channel_results"][ch] = channel_info
+                continue
+            if "Source" in sel_raw.columns:
+                base = base.merge(
+                    sel_raw[["DateTime", "Source"]],
+                    on="DateTime",
+                    how="left",
+                )
             else:
-                channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)', 'Source'])
-                channel_info['oor_reason'] = 'No merged data available to evaluate OOR events.'
+                base["Source"] = primary_legend
+
+            df_ch = base.sort_values("DateTime").copy()
+            upper_mask = (df_ch[ch] > ch_hi) if ch_hi is not None else False
+            df_ch['OOR'] = (df_ch[ch] < ch_lo) | upper_mask
+            if df_ch.empty:
+                channel_info['oor_table'] = pd.DataFrame(
+                    columns=['Start', 'End', 'Duration(min)', 'Source']
+                )
+                channel_info['oor_reason'] = 'No raw data available to evaluate OOR events.'
+                result["channel_results"][ch] = channel_info
+                continue
+            df_ch['next_dt'] = df_ch['DateTime'].shift(-1)
+            med_step = (
+                df_ch['DateTime'].diff().dt.total_seconds().div(60).median()
+            )
+            df_ch['dur_min'] = (
+                (df_ch['next_dt'] - df_ch['DateTime']).dt.total_seconds().div(60)
+            ).fillna(med_step).clip(lower=0)
+            df_ch['blk'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
+            events = []
+            for _, grp in df_ch[df_ch['OOR']].groupby('blk'):
+                start = grp['DateTime'].iloc[0]
+                end = grp['next_dt'].iloc[-1]
+                if pd.isna(end) and pd.notna(med_step):
+                    end = grp['DateTime'].iloc[-1] + pd.to_timedelta(med_step, unit='m')
+                duration = float(grp['dur_min'].sum())
+                mode_source = grp['Source'].mode(dropna=True)
+                if not mode_source.empty:
+                    source_label = mode_source.iloc[0]
+                else:
+                    non_na_sources = grp['Source'].dropna()
+                    source_label = non_na_sources.iloc[0] if not non_na_sources.empty else primary_legend
+                events.append({'Start': start, 'End': end, 'Duration(min)': duration, 'Source': source_label})
+            ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)', 'Source'])
+            channel_info['oor_table'] = ev_df
+            total = float(ev_df['Duration(min)'].sum()) if not ev_df.empty else 0.0
+            incident = bool(total >= 60 or (not ev_df.empty and ev_df['Duration(min)'].max() > 60))
+            channel_info['total_minutes'] = total
+            channel_info['incident'] = incident
         else:
             channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)', 'Source'])
             channel_info['oor_reason'] = 'No limits available for this channel, so OOR events cannot be calculated.'
