@@ -114,6 +114,34 @@ def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
+def merge_serial_data(
+    existing: Dict[str, pd.DataFrame], new_df: pd.DataFrame, serial: str
+) -> pd.DataFrame:
+    """Merge a new dataframe into an existing serial collection.
+
+    The merge keeps a single dataframe per serial number by concatenating the
+    incoming rows with any previously seen data, removing duplicate timestamps,
+    and re-sorting the result chronologically.  The processed dataframe is stored
+    back into ``existing`` and also returned to the caller so the merged
+    reference can be reused by other structures (e.g. tables and charts).
+    """
+
+    if serial in existing and isinstance(existing[serial], pd.DataFrame):
+        combined = pd.concat([existing[serial], new_df], ignore_index=True)
+    else:
+        combined = new_df.copy()
+
+    if 'DateTime' in combined.columns:
+        combined['DateTime'] = pd.to_datetime(combined['DateTime'], errors='coerce')
+        combined = combined.dropna(subset=['DateTime'])
+        combined = combined.sort_values('DateTime')
+        combined = combined.drop_duplicates(subset=['DateTime'], keep='last')
+
+    merged = _finalize_serial_dataframe(combined)
+    existing[serial] = merged
+    return merged
+
+
 def _extract_report_blocks(
     text: str,
 ) -> Optional[Tuple[Dict[str, Optional[str]], List[List[str]]]]:

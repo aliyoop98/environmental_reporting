@@ -19,6 +19,7 @@ if __package__:
     from .data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
+        merge_serial_data,
         parse_serial_csv,
     )
 else:
@@ -27,6 +28,7 @@ else:
     from data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
+        merge_serial_data,
         parse_serial_csv,
     )
 
@@ -66,6 +68,52 @@ def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]
     if 'hum' in ch_lower and 'Humidity' in ts_df.columns:
         return 'Humidity'
     return None
+
+
+def _merge_serial_info(
+    existing: Dict[str, object], incoming: Dict[str, object], merged_df: pd.DataFrame
+) -> Dict[str, object]:
+    """Combine metadata for serial datasets that have been merged."""
+
+    result: Dict[str, object] = dict(existing)
+    result['df'] = merged_df
+
+    serial_value = incoming.get('serial') or existing.get('serial')
+    if serial_value is not None:
+        result['serial'] = serial_value
+
+    merged_range: Dict[str, Tuple[float, float]] = {}
+    if isinstance(existing.get('range_map'), dict):
+        merged_range.update(existing['range_map'])  # type: ignore[arg-type]
+    if isinstance(incoming.get('range_map'), dict):
+        merged_range.update(incoming['range_map'])  # type: ignore[arg-type]
+    if merged_range:
+        result['range_map'] = merged_range
+
+    existing_channels = [
+        ch for ch in result.get('channels', []) if isinstance(ch, str)
+    ]
+    incoming_channels = [
+        ch for ch in incoming.get('channels', []) if isinstance(ch, str)
+    ]
+    combined_channels = list(dict.fromkeys(existing_channels + incoming_channels))
+    if combined_channels:
+        result['channels'] = combined_channels
+
+    for field in ('default_label', 'option_label'):
+        new_value = incoming.get(field)
+        if new_value:
+            result[field] = new_value
+
+    sources: List[str] = []
+    for value in (existing.get('source_name'), incoming.get('source_name')):
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(',') if part.strip()]
+            sources.extend(parts)
+    if sources:
+        result['source_name'] = ", ".join(dict.fromkeys(sources))
+
+    return result
 
 
 def _state_key(prefix: str, identifier: str) -> str:
@@ -274,6 +322,9 @@ def _downsample(df: pd.DataFrame, max_points: int = 5000) -> pd.DataFrame:
 
 
 serial_data: Dict[str, Dict[str, object]] = {}
+serial_to_key: Dict[str, str] = {}
+serial_frames: Dict[str, pd.DataFrame] = {}
+serial_row_counts: Dict[str, int] = {}
 total_rows = 0
 if serial_files:
     progress = st.sidebar.progress(0.0)
@@ -286,10 +337,47 @@ if serial_files:
             st.sidebar.exception(exc)
             parsed = {}
         for key, info in parsed.items():
-            serial_data[key] = info
-            df_obj = info.get('df') if isinstance(info, dict) else None
-            if isinstance(df_obj, pd.DataFrame):
-                total_rows += len(df_obj)
+            if not isinstance(info, dict):
+                serial_data[key] = info
+                continue
+
+            info_dict: Dict[str, object] = dict(info)
+
+            df_obj = info_dict.get('df')
+            if not isinstance(df_obj, pd.DataFrame):
+                df_obj = None
+
+            raw_serial = info_dict.get('serial')
+            serial_value = str(raw_serial).strip() if raw_serial not in {None, ''} else ''
+
+            if isinstance(df_obj, pd.DataFrame) and serial_value:
+                merged_df = merge_serial_data(serial_frames, df_obj, serial_value)
+                info_dict['df'] = merged_df
+                info_dict['serial'] = serial_value
+
+                if serial_value in serial_to_key:
+                    existing_key = serial_to_key[serial_value]
+                    existing_info = serial_data.get(existing_key, {})
+                    if not isinstance(existing_info, dict):
+                        existing_info = {}
+                    merged_info = _merge_serial_info(existing_info, info_dict, merged_df)
+                    serial_data[existing_key] = merged_info
+                    prev_len = serial_row_counts.get(existing_key, 0)
+                    new_len = len(merged_df)
+                    total_rows += new_len - prev_len
+                    serial_row_counts[existing_key] = new_len
+                else:
+                    serial_data[key] = info_dict
+                    serial_to_key[serial_value] = key
+                    serial_row_counts[key] = len(merged_df)
+                    total_rows += len(merged_df)
+            else:
+                serial_data[key] = info_dict
+                if isinstance(df_obj, pd.DataFrame):
+                    prev_len = serial_row_counts.get(key, 0)
+                    new_len = len(df_obj)
+                    total_rows += new_len - prev_len
+                    serial_row_counts[key] = new_len
         progress.progress(idx / max(len(serial_files), 1))
     progress.empty()
 else:
