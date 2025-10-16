@@ -114,10 +114,10 @@ def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
-def _split_report_header_and_table(
+def _extract_report_blocks(
     text: str,
-) -> Optional[Tuple[Dict[str, Optional[str]], List[str]]]:
-    """Split Traceable Live report text into metadata and table lines."""
+) -> Optional[Tuple[Dict[str, Optional[str]], List[List[str]]]]:
+    """Return metadata and all channel data blocks from a Traceable report."""
 
     if not text:
         return None
@@ -126,21 +126,10 @@ def _split_report_header_and_table(
     if not any(line.lstrip().lower().startswith("device id:") for line in lines):
         return None
 
-    table_start = None
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        lowered = stripped.lower()
-        if lowered.startswith("timestamp") and "data" in lowered and "range" in lowered:
-            table_start = idx
-            break
-    if table_start is None:
-        return None
-
     device_id: Optional[str] = None
     device_name: Optional[str] = None
     timezone: Optional[str] = None
-    header_slice = lines[:table_start]
-    for line in header_slice:
+    for line in lines[:40]:
         match = _DEVICE_ID_RE.search(line)
         if match:
             device_id = match.group(1)
@@ -150,25 +139,50 @@ def _split_report_header_and_table(
         elif lower.startswith("report timezone:"):
             timezone = line.split(":", 1)[1].strip()
 
-    table_lines: List[str] = []
-    header_added = False
-    for line in lines[table_start:]:
-        if not header_added:
-            table_lines.append(line)
-            header_added = True
-            continue
-        # Blank lines appear mid-table in some exports; skip them instead of stopping.
-        if not line.strip():
-            continue
-        if line.strip().lower().startswith("channel data for"):
-            break
-        table_lines.append(line)
+    header_indexes = [
+        idx
+        for idx, line in enumerate(lines)
+        if line.strip().lower().startswith("timestamp")
+        and "data" in line.lower()
+        and "range" in line.lower()
+    ]
+    if not header_indexes:
+        return None
 
-    if len(table_lines) <= 1:
+    blocks: List[List[str]] = []
+    for start in header_indexes:
+        end = len(lines)
+        for pos in range(start + 1, len(lines)):
+            stripped = lines[pos].strip()
+            lowered = stripped.lower()
+            if lowered.startswith("channel data for"):
+                end = pos
+                break
+            if (
+                lowered.startswith("timestamp")
+                and "data" in lowered
+                and "range" in lowered
+            ):
+                end = pos
+                break
+
+        block: List[str] = []
+        for row in lines[start:end]:
+            if not block:
+                block.append(row)
+                continue
+            if not row.strip():
+                continue
+            block.append(row)
+
+        if len(block) > 1:
+            blocks.append(block)
+
+    if not blocks:
         return None
 
     meta = {"device_id": device_id, "device_name": device_name, "timezone": timezone}
-    return meta, table_lines
+    return meta, blocks
 
 
 _TEMP_RANGE_HINTS: Tuple[Tuple[Tuple[str, ...], Tuple[float, float]], ...] = (
@@ -218,19 +232,26 @@ def _parse_traceable_report_csv(
 ) -> List[Dict[str, object]]:
     """Parse Traceable Live per-asset report CSVs."""
 
-    split = _split_report_header_and_table(text)
-    if not split:
+    extracted = _extract_report_blocks(text)
+    if not extracted:
         return []
 
-    meta, table_lines = split
-    csv_text = "\n".join(table_lines)
-    try:
-        df = pd.read_csv(io.StringIO(csv_text), engine="python")
-    except Exception:
+    meta, blocks = extracted
+    frames: List[pd.DataFrame] = []
+    for block in blocks:
+        csv_text = "\n".join(block)
+        try:
+            frame = pd.read_csv(io.StringIO(csv_text), engine="python")
+        except Exception:
+            continue
+        if frame.empty:
+            continue
+        frames.append(frame)
+
+    if not frames:
         return []
 
-    if df.empty:
-        return []
+    df = pd.concat(frames, ignore_index=True)
 
     normalized_cols = {
         _normalize_header(col): col for col in df.columns if isinstance(col, str)

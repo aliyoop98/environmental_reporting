@@ -310,6 +310,10 @@ for key, info in serial_data.items():
     st.sidebar.caption(f"{key}: {row_count:,} rows")
 
 primary_dfs, primary_ranges, serial_metadata = _prepare_serial_primary(serial_data)
+st.sidebar.caption("Max timestamp per serial (debug):")
+for key, df in primary_dfs.items():
+    if not df.empty and "DateTime" in df:
+        st.sidebar.write(f"{key}: {df['DateTime'].max()}")
 if not primary_dfs:
     st.sidebar.info("No valid serial data found in the uploaded files.")
     st.stop()
