@@ -1183,10 +1183,17 @@ def _parse_tempstick_files(files):
 
 def merge_serial_data(existing: dict, new_df, serial: str):
     """
-    Merge or create a combined DataFrame for each serial.
-    Keeps chronological order and drops duplicates by timestamp.
+    Merge/create a combined DataFrame for a serial.
+    If multiple rows share the same DateTime (e.g., one has Temperature and the other has Humidity),
+    coalesce columns so we KEEP both channel values instead of dropping one row.
     """
     import pandas as pd
+
+    def _coalesce_series(series: pd.Series):
+        valid = series.dropna()
+        if valid.empty:
+            return pd.NA
+        return valid.iloc[-1]
 
     if serial in existing and isinstance(existing[serial], pd.DataFrame):
         merged = pd.concat([existing[serial], new_df], ignore_index=True)
@@ -1196,11 +1203,20 @@ def merge_serial_data(existing: dict, new_df, serial: str):
     if "DateTime" in merged.columns:
         merged["DateTime"] = pd.to_datetime(merged["DateTime"], errors="coerce")
         merged = merged.dropna(subset=["DateTime"])
-        merged = (
-            merged.drop_duplicates(subset=["DateTime"], keep="last")
-            .sort_values("DateTime")
-            .reset_index(drop=True)
-        )
+        merged = merged.sort_values("DateTime")
 
-    existing[serial] = merged
-    return merged
+        value_cols = [col for col in merged.columns if col != "DateTime"]
+        if value_cols:
+            agg_map = {col: _coalesce_series for col in value_cols}
+            merged = merged.groupby("DateTime", as_index=False, sort=True).agg(agg_map)
+        else:
+            merged = merged.drop_duplicates(subset=["DateTime"], keep="last")
+
+        if "Date" not in merged.columns:
+            merged["Date"] = pd.to_datetime(merged["DateTime"]).dt.date
+        if "Time" not in merged.columns:
+            merged["Time"] = pd.to_datetime(merged["DateTime"]).dt.strftime("%H:%M")
+
+    result = merged.reset_index(drop=True)
+    existing[serial] = result
+    return result
