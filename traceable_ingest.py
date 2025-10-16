@@ -1,9 +1,9 @@
 """Traceable CSV ingestion utilities.
 
-This module implements an alternative ingest path that yields columns such as
-``datetime``, ``temp_c`` and ``rh_percent``. The Streamlit app (`app.py`) does
-not import this module and instead expects the canonical schema produced by
-``data_processing.py`` (``DateTime``, ``Temperature``, ``Humidity``). The note
+This module implements an alternative ingest path that yields canonical
+columns (``DateTime``, ``Temperature``, ``Humidity``) similar to the
+``data_processing`` pipeline. The Streamlit app (`app.py`) does not import this
+module and instead expects the canonical schema produced elsewhere; the note
 exists to avoid wiring the two together inadvertently in the future.
 """
 
@@ -94,29 +94,49 @@ def _find_column(columns: pd.Index, *keywords: str) -> Optional[str]:
     return None
 
 
-def _identify_temp_column(columns: pd.Index) -> Optional[str]:
-    """Return the column name that most resembles a temperature measurement."""
+def _normalize_text(value: object) -> str:
+    """Return a stripped, lower-case representation of arbitrary text."""
 
-    candidates = []
-    for col in columns:
-        lower = str(col).lower()
-        stripped = lower.replace("°", "").replace("deg", "").strip()
-        if "temp" in lower or stripped in {"c", "celsius"}:
-            candidates.append(col)
-        elif "c" in stripped.split():
-            candidates.append(col)
-    return candidates[0] if candidates else None
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text.lower()
 
 
-def _identify_humidity_column(columns: pd.Index) -> Optional[str]:
-    """Return the column name that most resembles a humidity measurement."""
+def _classify_channel(channel: str, unit: str) -> Optional[str]:
+    """Classify a Traceable measurement into Temperature or Humidity."""
 
-    candidates = []
-    for col in columns:
-        lower = str(col).lower()
-        if "%" in lower or "humidity" in lower or "rh" in lower or "humid" in lower:
-            candidates.append(col)
-    return candidates[0] if candidates else None
+    channel_norm = _normalize_text(channel)
+    channel_key = channel_norm.replace(" ", "")
+    unit_norm = _normalize_text(unit)
+
+    direct_map = {
+        "sensor1": "Humidity",
+        "sensor2": "Temperature",
+        "sensor01": "Humidity",
+        "sensor02": "Temperature",
+    }
+    if channel_key in direct_map:
+        return direct_map[channel_key]
+
+    if not channel_norm and unit_norm:
+        channel_norm = unit_norm
+
+    if any(token in channel_norm for token in ("humid", "rh")):
+        return "Humidity"
+    if any(token in unit_norm for token in ("%", "percent")):
+        return "Humidity"
+
+    temp_tokens = ("temp", "°c", "celsius", "degc", "°f", "fahrenheit")
+    if any(token in channel_norm for token in temp_tokens):
+        return "Temperature"
+    if any(token in unit_norm for token in temp_tokens):
+        return "Temperature"
+
+    if channel_norm in {"temperature", "humidity"}:
+        return channel_norm.capitalize()
+
+    return None
 
 
 def _new_format_to_dataframes(
@@ -137,38 +157,65 @@ def _new_format_to_dataframes(
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors="coerce")
     df = df.dropna(subset=[timestamp_col, serial_col])
 
-    pivot_column = unit_col if unit_col and df[unit_col].notna().any() else channel_col
-
     grouped: Dict[str, pd.DataFrame] = {}
+
+    measurement_col = "__measurement"
+    df = df.copy()
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors="coerce")
+    df = df.dropna(subset=[timestamp_col, serial_col])
+
+    df[serial_col] = df[serial_col].astype(str).str.strip()
+    df[data_col] = pd.to_numeric(df[data_col], errors="coerce")
+
+    if channel_col:
+        channel_values = df[channel_col]
+    else:
+        channel_values = pd.Series([""] * len(df), index=df.index)
+    if unit_col:
+        unit_values = df[unit_col]
+    else:
+        unit_values = pd.Series([""] * len(df), index=df.index)
+    df[measurement_col] = [
+        _classify_channel(channel, unit)
+        for channel, unit in zip(channel_values, unit_values)
+    ]
+    df = df.dropna(subset=[measurement_col])
+
+    if df.empty:
+        return {}
+
     for serial, serial_df in df.groupby(serial_col):
-        if pivot_column is None:
-            serial_pivot = serial_df.set_index(timestamp_col)[[data_col]]
-        else:
-            serial_pivot = serial_df.pivot_table(
+        if serial_df.empty:
+            continue
+        pivot = (
+            serial_df.pivot_table(
                 index=timestamp_col,
-                columns=pivot_column,
+                columns=measurement_col,
                 values=data_col,
-                aggfunc="first",
+                aggfunc="last",
             )
-        serial_pivot = serial_pivot.sort_index()
+            .sort_index()
+            .rename_axis(None, axis=1)
+        )
 
-        if isinstance(serial_pivot, pd.Series):  # only one pivot column
-            serial_pivot = serial_pivot.to_frame()
+        if pivot.empty:
+            continue
 
-        temp_col = _identify_temp_column(serial_pivot.columns)
-        humidity_col = _identify_humidity_column(serial_pivot.columns)
+        wide = pivot.reset_index().rename(columns={timestamp_col: "DateTime"})
+        wide = wide.sort_values("DateTime")
 
-        result = pd.DataFrame()
-        result["datetime"] = serial_pivot.index
-        if temp_col is not None:
-            result["temp_c"] = pd.to_numeric(serial_pivot[temp_col], errors="coerce")
-        if humidity_col is not None:
-            result["rh_percent"] = pd.to_numeric(
-                serial_pivot[humidity_col], errors="coerce"
-            )
+        for column in ("Temperature", "Humidity"):
+            if column in wide.columns:
+                wide[column] = pd.to_numeric(wide[column], errors="coerce")
+            else:
+                wide[column] = pd.Series(pd.NA, index=wide.index, dtype="Float64")
 
-        alias = serial_alias.get(serial, serial) if serial_alias else serial
-        grouped[str(alias)] = result.reset_index(drop=True)
+        ordered = ["DateTime", "Temperature", "Humidity"]
+        wide = wide[ordered]
+
+        serial_str = str(serial)
+        alias = serial_alias.get(serial_str, serial_str) if serial_alias else serial_str
+        grouped[str(alias)] = wide.reset_index(drop=True)
 
     return grouped
 
