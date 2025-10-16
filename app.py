@@ -211,7 +211,12 @@ def _prepare_serial_primary(
             continue
         combined = pd.concat(dfs, ignore_index=True)
         if 'DateTime' in combined.columns:
+            combined['DateTime'] = pd.to_datetime(combined['DateTime'], errors='coerce')
+            combined = combined.dropna(subset=['DateTime'])
             combined = combined.sort_values('DateTime')
+            combined = combined.drop_duplicates(subset=['DateTime'], keep='last')
+            combined['Date'] = combined['DateTime'].dt.date
+            combined['Time'] = combined['DateTime'].dt.strftime('%H:%M')
         if 'Date' in combined.columns:
             combined['Date'] = pd.to_datetime(combined['Date'], errors='coerce')
         combined = combined.reset_index(drop=True)
@@ -300,7 +305,7 @@ def _downsample(df: pd.DataFrame, max_points: int = 5000) -> pd.DataFrame:
 
     resampled = (
         df_sorted.set_index("DateTime")
-        .resample(f"{step}T")
+        .resample(f"{step}min")
         .mean(numeric_only=True)
         .dropna(how="all")
         .reset_index()
@@ -398,10 +403,10 @@ for key, info in serial_data.items():
     st.sidebar.caption(f"{key}: {row_count:,} rows")
 
 primary_dfs, primary_ranges, serial_metadata = _prepare_serial_primary(serial_data)
-st.sidebar.caption("Max timestamp per serial (debug):")
+st.sidebar.caption("Max timestamp per serial (debug)")
 for key, df in primary_dfs.items():
-    if not df.empty and "DateTime" in df:
-        st.sidebar.write(f"{key}: {df['DateTime'].max()}")
+    if "DateTime" in df.columns and not df.empty:
+        st.sidebar.write(key, df["DateTime"].max())
 if not primary_dfs:
     st.sidebar.info("No valid serial data found in the uploaded files.")
     st.stop()
