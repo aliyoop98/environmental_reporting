@@ -153,6 +153,10 @@ def _new_format_to_dataframes(
     if not timestamp_col or not serial_col or not data_col:
         raise ValueError("Traceable CSV missing required columns for new format")
 
+    alias_lookup: Optional[Dict[str, str]] = None
+    if serial_alias:
+        alias_lookup = {str(key).strip(): value for key, value in serial_alias.items()}
+
     df = df.copy()
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors="coerce")
     df = df.dropna(subset=[timestamp_col, serial_col])
@@ -214,7 +218,10 @@ def _new_format_to_dataframes(
         wide = wide[ordered]
 
         serial_str = str(serial)
-        alias = serial_alias.get(serial_str, serial_str) if serial_alias else serial_str
+        if alias_lookup and serial_str in alias_lookup:
+            alias = alias_lookup[serial_str]
+        else:
+            alias = serial_str
         grouped[str(alias)] = wide.reset_index(drop=True)
 
     return grouped
