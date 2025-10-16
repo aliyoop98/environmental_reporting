@@ -8,11 +8,22 @@ import pandas as pd
 
 _ZERO_WIDTH_CHARS = ("\ufeff", "\u200b", "\u200c", "\u200d")
 
+DEFAULT_TEMP_RANGE: Tuple[float, float] = (15, 25)
+DEFAULT_HUMIDITY_RANGE: Tuple[float, float] = (0, 60)
+
 TEMP_COL_ALIASES = ["Temperature", "Temp", "Temp (°C)", "Temperature (°C)"]
+HUMI_COL_ALIASES = ["Humidity", "Humidity (%RH)", "RH", "RH (%)"]
+
+PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
+    "Freezer": {"temp": (-35.0, -5.0), "humi": None},
+    "Fridge": {"temp": (2.0, 8.0), "humi": None},
+    "Room": {"temp": (15.0, 25.0), "humi": (0.0, 60.0)},
+    "Area": {"temp": (15.0, 25.0), "humi": (0.0, 60.0)},
+}
 
 
 def _infer_profile_from_name(*candidates: Optional[str]) -> Optional[str]:
-    """Infer a fridge/freezer profile from a collection of text hints."""
+    """Infer an environmental profile from a collection of text hints."""
 
     pieces: List[str] = []
     for candidate in candidates:
@@ -23,38 +34,37 @@ def _infer_profile_from_name(*candidates: Optional[str]) -> Optional[str]:
         return None
     text = " ".join(pieces).lower()
     if "freezer" in text:
-        return "freezer"
+        return "Freezer"
     if "fridge" in text or "refrigerator" in text:
-        return "fridge"
+        return "Fridge"
+    if "room" in text or "area" in text:
+        return "Room"
     return None
 
 
-def _default_temp_range_for(profile: str) -> Optional[Tuple[float, float]]:
-    if profile == "freezer":
-        return (-35.0, -5.0)
-    if profile == "fridge":
-        return (2.0, 8.0)
-    return None
-
-
-def _apply_inferred_temperature_range(
+def _apply_inferred_ranges(
     range_map: Dict[str, Tuple[float, float]], *name_hints: Optional[str]
 ) -> None:
-    """Populate range_map with inferred temperature ranges for known aliases."""
+    """Populate range_map with inferred temperature and humidity ranges."""
 
     profile = _infer_profile_from_name(*name_hints)
-    if not profile:
-        return
-    default_range = _default_temp_range_for(profile)
-    if not default_range:
-        return
-    inferred_range = range_map.get("Temperature", default_range)
-    for alias in TEMP_COL_ALIASES:
-        if alias == "Temperature":
-            if alias not in range_map:
-                range_map[alias] = inferred_range
-            continue
-        range_map.setdefault(alias, inferred_range)
+    limits = PROFILE_LIMITS.get(profile or "") if profile else None
+    if not limits:
+        limits = {"temp": None, "humi": DEFAULT_HUMIDITY_RANGE}
+
+    temp_range = limits.get("temp")
+    if temp_range is None:
+        temp_range = range_map.get("Temperature")
+    humidity_range = limits.get("humi")
+    if humidity_range is None:
+        humidity_range = range_map.get("Humidity", DEFAULT_HUMIDITY_RANGE)
+
+    if temp_range:
+        for alias in TEMP_COL_ALIASES:
+            range_map.setdefault(alias, temp_range)
+    if humidity_range:
+        for alias in HUMI_COL_ALIASES:
+            range_map.setdefault(alias, humidity_range)
 
 
 def _strip_bom_and_zero_width(text: str) -> str:
@@ -277,10 +287,10 @@ def _parse_traceable_report_csv(
 
     context = _normalise_context_text(source_name, meta.get("device_name"))
     temp_range = _infer_temperature_range(context, default_temp_range)
-    range_map: Dict[str, Tuple[float, float]] = {"Temperature": temp_range}
-    _apply_inferred_temperature_range(
-        range_map, source_name, meta.get("device_name"), device_id
-    )
+    range_map: Dict[str, Tuple[float, float]] = {}
+    range_map["Temperature"] = temp_range
+    range_map.setdefault("Humidity", DEFAULT_HUMIDITY_RANGE)
+    _apply_inferred_ranges(range_map, source_name, meta.get("device_name"), device_id)
 
     return [
         {
@@ -361,9 +371,6 @@ _SPACE_TYPE_HINTS: Tuple[Tuple[str, ...], ...] = (
     ("space", "category"),
     ("environment", "category"),
 )
-
-DEFAULT_TEMP_RANGE: Tuple[float, float] = (15, 25)
-DEFAULT_HUMIDITY_RANGE: Tuple[float, float] = (0, 60)
 
 
 def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
@@ -479,7 +486,8 @@ def _parse_consolidated_serial_text(
         if finalized.empty:
             continue
         range_map = dict(bucket.get('range_map', {}))
-        _apply_inferred_temperature_range(
+        range_map.setdefault('Humidity', DEFAULT_HUMIDITY_RANGE)
+        _apply_inferred_ranges(
             range_map,
             bucket.get('source_name', name),
             bucket.get('serial', ''),
@@ -697,42 +705,61 @@ def _process_new_schema_df(
         space_name = str(key_map.get('_SpaceName', '')).strip()
         space_type = str(key_map.get('_SpaceType', '')).strip()
         sdf = sdf.copy()
-        sdf['Measurement'] = sdf.apply(
+        channel_lower = (
+            sdf['Channel']
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        saw_sensor1 = channel_lower.isin({'sensor1', 'sensor 1'}).any()
+        saw_sensor2 = channel_lower.isin({'sensor2', 'sensor 2'}).any()
+        sensor_map = {
+            'sensor1': 'Humidity',
+            'sensor 1': 'Humidity',
+            'sensor2': 'Temperature',
+            'sensor 2': 'Temperature',
+        }
+        measurement = sdf.apply(
             lambda row: _classify_measurement(
                 row.get('Channel'), row.get('Unit of Measure')
             ),
             axis=1,
         )
-        unit_series = sdf['Unit of Measure'].fillna('').astype(str)
-        unit_clean = unit_series.str.strip().str.lower()
-        missing_measurement = sdf['Measurement'].isna()
-        unit_missing = unit_clean.isin({'', 'nan', 'none', 'null'})
-        fallback_mask = missing_measurement & unit_missing
-        if fallback_mask.any():
-            channel_norm = (
-                sdf.loc[fallback_mask, 'Channel']
-                .astype(str)
-                .str.strip()
-                .str.lower()
-            )
-            fallback_map = {
-                'sensor1': 'Humidity',
-                'sensor2': 'Temperature',
-            }
-            sdf.loc[fallback_mask, 'Measurement'] = channel_norm.map(fallback_map)
-        sdf = sdf.dropna(subset=['Measurement'])
+        measurement = measurement.fillna(channel_lower.map(sensor_map))
+        direct_channel_map = {
+            'humidity': 'Humidity',
+            'relative humidity': 'Humidity',
+            'rh': 'Humidity',
+            'temperature': 'Temperature',
+            'temp': 'Temperature',
+        }
+        measurement = measurement.fillna(channel_lower.map(direct_channel_map))
+        sdf['Channel'] = measurement
+        sdf = sdf.dropna(subset=['Channel'])
         if sdf.empty:
             continue
         sdf = sdf.sort_values('Timestamp')
         pivot = sdf.pivot_table(
             index='Timestamp',
-            columns='Measurement',
+            columns='Channel',
             values='Data',
             aggfunc='last',
         )
         if pivot.empty:
             continue
         pivot = pivot.rename_axis(None, axis=1).sort_index()
+        expected_channels = {
+            ch
+            for ch in sdf['Channel'].dropna().unique()
+            if isinstance(ch, str)
+        }
+        if saw_sensor1:
+            expected_channels.add('Humidity')
+        if saw_sensor2:
+            expected_channels.add('Temperature')
+        for col in ('Temperature', 'Humidity'):
+            if col in expected_channels and col not in pivot.columns:
+                pivot[col] = pd.NA
         pivot['DateTime'] = pivot.index
         pivot['Date'] = pivot['DateTime'].dt.date
         pivot['Time'] = pivot['DateTime'].dt.strftime('%H:%M:%S')
@@ -764,7 +791,8 @@ def _process_new_schema_df(
             range_map['Humidity'] = default_humidity_range
             channels.append('Humidity')
 
-        _apply_inferred_temperature_range(
+        range_map.setdefault('Humidity', DEFAULT_HUMIDITY_RANGE)
+        _apply_inferred_ranges(
             range_map, name, display_name, space_name, space_type, serial
         )
 
