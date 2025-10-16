@@ -1129,38 +1129,68 @@ for tab, name in zip(tabs, serial_keys):
                     st.markdown(f"### {ch} OOR Events")
                     ev_df = ch_result["oor_table"]
                     if not ev_df.empty:
-                        selection_key = _state_key("oor_exclusions", f"{name}|{ch}")
-                        st.markdown("#### OOR Event Selection")
-                        ev_df_display = ev_df.copy()
-                        ev_df_display["Include"] = True
+                        table_key = f"oor_exclusions_{name}_{ch}"
+                        toggle_key = f"oor_toggle_{name}_{ch}"
+                        st.markdown("### OOR Summary")
+                        show_selector = st.checkbox(
+                            "Show OOR Event Selection (advanced)",
+                            key=toggle_key,
+                            value=st.session_state.get(toggle_key, False),
+                            help=(
+                                "Toggle to include/exclude individual OOR events. "
+                                "When off, totals use your last saved selection (or all if none)."
+                            ),
+                        )
 
-                        if selection_key not in st.session_state:
-                            st.session_state[selection_key] = ev_df_display["Include"].tolist()
+                        includes = st.session_state.get(table_key)
+                        if includes is None or len(includes) != len(ev_df):
+                            includes = [True] * len(ev_df)
+                            st.session_state[table_key] = includes
+                            for idx in range(len(ev_df)):
+                                st.session_state[f"{table_key}_{idx}"] = True
 
-                        includes: List[bool] = []
-                        for idx, row in ev_df_display.iterrows():
-                            previous = (
-                                st.session_state[selection_key][idx]
-                                if idx < len(st.session_state[selection_key])
-                                else True
-                            )
-                            checkbox_label = (
-                                f"{row['Source']} | {row['Start']} → {row['End']} "
-                                f"({row['Duration(min)']:.1f} min)"
-                            )
-                            checked = st.checkbox(
-                                checkbox_label,
-                                value=previous,
-                                key=f"{selection_key}_row_{idx}",
-                            )
-                            includes.append(checked)
+                        if show_selector:
+                            st.markdown("#### OOR Event Selection")
+                            cols = st.columns(3)
 
-                        ev_df_display["Include"] = includes
-                        st.session_state[selection_key] = includes
+                            def _update_row_state(values: List[bool]) -> None:
+                                for j, val in enumerate(values):
+                                    st.session_state[f"{table_key}_{j}"] = val
 
-                        included_df = ev_df_display[ev_df_display["Include"]]
+                            if cols[0].button("Select all", key=f"sel_all_{name}_{ch}"):
+                                includes = [True] * len(ev_df)
+                                st.session_state[table_key] = includes
+                                _update_row_state(includes)
+                            if cols[1].button("Select none", key=f"sel_none_{name}_{ch}"):
+                                includes = [False] * len(ev_df)
+                                st.session_state[table_key] = includes
+                                _update_row_state(includes)
+                            if cols[2].button("Clear changes", key=f"sel_clear_{name}_{ch}"):
+                                includes = [True] * len(ev_df)
+                                st.session_state[table_key] = includes
+                                _update_row_state(includes)
+
+                            new_includes: List[bool] = []
+                            for i, row in ev_df.reset_index(drop=True).iterrows():
+                                row_key = f"{table_key}_{i}"
+                                if row_key not in st.session_state:
+                                    st.session_state[row_key] = includes[i]
+                                label = (
+                                    f"{row.get('Source', '(Merged)')} | {row['Start']} → {row['End']} "
+                                    f"({row['Duration(min)']:.1f} min)"
+                                )
+                                checked = bool(st.checkbox(label, key=row_key))
+                                new_includes.append(checked)
+                            includes = new_includes
+                            st.session_state[table_key] = includes
+                            _update_row_state(includes)
+
+                        included_indices = [i for i, inc in enumerate(includes) if inc]
+                        included_df = ev_df.iloc[included_indices] if included_indices else ev_df.iloc[[]]
                         total_included = (
-                            included_df["Duration(min)"].sum() if not included_df.empty else 0.0
+                            float(included_df["Duration(min)"].sum())
+                            if not included_df.empty
+                            else 0.0
                         )
                         incident_included = bool(
                             total_included >= 60
@@ -1172,30 +1202,38 @@ for tab, name in zip(tabs, serial_keys):
 
                         st.write(f"**Total Included OOR minutes:** {total_included:.1f}")
                         st.write(f"**Incident:** {'YES' if incident_included else 'No'}")
+                        if show_selector and (len(includes) != sum(includes)):
+                            excluded_indices = [
+                                i for i, inc in enumerate(includes) if not inc
+                            ]
+                            if excluded_indices:
+                                with st.expander("Excluded events"):
+                                    st.dataframe(
+                                        ev_df.iloc[excluded_indices][
+                                            [
+                                                "Source",
+                                                "Start",
+                                                "End",
+                                                "Duration(min)",
+                                            ]
+                                        ]
+                                    )
 
-                        included_table = included_df.drop(columns=["Include"])
-                        if not included_table.empty:
-                            st.dataframe(included_table)
+                        if not included_df.empty:
+                            st.dataframe(included_df)
                         else:
                             st.info("All OOR events are currently excluded.")
 
-                        download_df = included_table.copy()
+                        download_df = included_df.copy()
                         csv_bytes = download_df.to_csv(index=False).encode("utf-8")
                         st.download_button(
                             "Download included OOR events (CSV)",
                             data=csv_bytes,
                             file_name=f"{name}_{ch}_oor_events.csv",
                             mime="text/csv",
-                            key=f"download_{selection_key}",
+                            key=f"download_{table_key}",
                             disabled=download_df.empty,
                         )
-
-                        if len(included_df) != len(ev_df_display):
-                            excluded_table = ev_df_display[~ev_df_display["Include"]][
-                                ["Source", "Start", "End", "Duration(min)"]
-                            ]
-                            with st.expander("Excluded events"):
-                                st.dataframe(excluded_table)
                     else:
                         st.info("No out-of-range events detected.")
                     if ch_result.get("oor_reason"):
