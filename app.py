@@ -565,7 +565,14 @@ def _build_outputs(
         "warnings": [],
     }
 
-    sel_full = df[(df['Date'].dt.year == year) & (df['Date'].dt.month == month)].sort_values('DateTime').reset_index(drop=True)
+    if 'Date' in df.columns and not df['Date'].isna().all():
+        sel_full = df[
+            (df['Date'].dt.year == year) & (df['Date'].dt.month == month)
+        ].sort_values('DateTime').reset_index(drop=True)
+    else:
+        sel_full = df[
+            (df['DateTime'].dt.year == year) & (df['DateTime'].dt.month == month)
+        ].sort_values('DateTime').reset_index(drop=True)
     if sel_full.empty:
         result["warnings"].append("No data for selected period.")
         return result
@@ -576,6 +583,7 @@ def _build_outputs(
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
 
     for ch in channels:
+        st.write("DEBUG — OOR rows for", name, ch, len(sel))
         channel_info = {
             "chart": None,
             "warning": None,
