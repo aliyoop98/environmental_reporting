@@ -15,17 +15,17 @@ from datetime import datetime, timedelta
 # directory might not already be on ``sys.path``.
 CURRENT_DIR = Path(__file__).resolve().parent
 
-if __package__:
-    from .data_processing import (
+try:
+    from data_processing import (
         _parse_probe_files,
         _parse_tempstick_files,
         merge_serial_data,
         parse_serial_csv,
     )
-else:
+except ModuleNotFoundError:  # pragma: no cover - import fallback
     if str(CURRENT_DIR) not in sys.path:
         sys.path.insert(0, str(CURRENT_DIR))
-    from data_processing import (
+    from .data_processing import (  # type: ignore[no-redef]
         _parse_probe_files,
         _parse_tempstick_files,
         merge_serial_data,
