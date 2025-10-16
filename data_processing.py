@@ -157,8 +157,9 @@ def _split_report_header_and_table(
             table_lines.append(line)
             header_added = True
             continue
+        # Blank lines appear mid-table in some exports; skip them instead of stopping.
         if not line.strip():
-            break
+            continue
         if line.strip().lower().startswith("channel data for"):
             break
         table_lines.append(line)
