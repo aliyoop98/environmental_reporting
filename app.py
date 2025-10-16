@@ -407,6 +407,14 @@ st.sidebar.caption("Max timestamp per serial (debug)")
 for key, df in primary_dfs.items():
     if "DateTime" in df.columns and not df.empty:
         st.sidebar.write(key, df["DateTime"].max())
+
+debug = primary_dfs.get("250269646")
+if debug is not None and "Humidity" in debug.columns:
+    st.sidebar.write("Last 10 RH rows:")
+    st.sidebar.write(
+        debug.loc[debug["Humidity"].notna(), ["DateTime", "Humidity"]]
+             .tail(10)
+    )
 if not primary_dfs:
     st.sidebar.info("No valid serial data found in the uploaded files.")
     st.stop()
