@@ -590,6 +590,40 @@ def _build_outputs(
 
     # Keep raw for OOR math; only downsample the copy used for charting
     sel_raw = sel_full
+    primary_source_label = probe_labels.get(name, "Probe")
+
+    sel_raw_for_oor = sel_raw.copy()
+    if "Source" not in sel_raw_for_oor.columns:
+        sel_raw_for_oor["Source"] = primary_source_label
+
+    combined_raw: List[pd.DataFrame] = [sel_raw_for_oor]
+    for opt_key in comparison_probes:
+        source, comp_name = comparison_options[opt_key]
+        if source == "secondary" and comp_name in secondary_dfs:
+            probe_df = secondary_dfs[comp_name]
+            if "DateTime" in probe_df.columns:
+                probe_copy = probe_df.copy()
+                if "Date" in probe_copy.columns and not probe_copy["Date"].isna().all():
+                    probe_copy = probe_copy[
+                        (probe_copy["Date"].dt.year == year)
+                        & (probe_copy["Date"].dt.month == month)
+                    ]
+                else:
+                    probe_copy = probe_copy[
+                        (probe_copy["DateTime"].dt.year == year)
+                        & (probe_copy["DateTime"].dt.month == month)
+                    ]
+                if probe_copy.empty:
+                    continue
+                if "Source" not in probe_copy.columns:
+                    probe_label = secondary_labels.get(comp_name, Path(comp_name).stem)
+                    probe_copy["Source"] = probe_label
+                combined_raw.append(probe_copy)
+
+    sel_all_raw = pd.concat(combined_raw, ignore_index=True)
+    sel_all_raw = sel_all_raw.sort_values("DateTime").reset_index(drop=True)
+    st.write("OOR sources merged:", len(combined_raw), "datasets")
+
     sel = _downsample(sel_full)
 
     start_date = datetime(year, month, 1)
@@ -860,7 +894,7 @@ def _build_outputs(
 
         ch_lo, ch_hi = channel_ranges.get(ch, (None, None))
         if ch_lo is not None:
-            base = sel_raw[["DateTime", ch]].dropna().copy()
+            base = sel_all_raw[["DateTime", ch]].dropna().copy()
             if base.empty:
                 channel_info['oor_table'] = pd.DataFrame(
                     columns=['Start', 'End', 'Duration(min)', 'Source']
@@ -868,9 +902,9 @@ def _build_outputs(
                 channel_info['oor_reason'] = 'No raw data available to evaluate OOR events.'
                 result["channel_results"][ch] = channel_info
                 continue
-            if "Source" in sel_raw.columns:
+            if "Source" in sel_all_raw.columns:
                 base = base.merge(
-                    sel_raw[["DateTime", "Source"]],
+                    sel_all_raw[["DateTime", "Source"]],
                     on="DateTime",
                     how="left",
                 )
