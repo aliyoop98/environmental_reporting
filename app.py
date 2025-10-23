@@ -329,6 +329,20 @@ def _downsample(df: pd.DataFrame, max_points: int = 5000) -> pd.DataFrame:
     return resampled[column_order].reset_index(drop=True)
 
 
+def _apply_window(
+    df: pd.DataFrame, window: Optional[Tuple[Optional[datetime], Optional[datetime]]]
+) -> pd.DataFrame:
+    if df is None or df.empty or "DateTime" not in df.columns or not window:
+        return df
+    start, end = window
+    mask = pd.Series(True, index=df.index)
+    if start:
+        mask &= df["DateTime"] >= pd.to_datetime(start)
+    if end:
+        mask &= df["DateTime"] <= pd.to_datetime(end)
+    return df.loc[mask].copy()
+
+
 serial_data: Dict[str, Dict[str, object]] = {}
 serial_to_key: Dict[str, str] = {}
 serial_frames: Dict[str, pd.DataFrame] = {}
@@ -406,21 +420,48 @@ for key, info in serial_data.items():
     st.sidebar.caption(f"{key}: {row_count:,} rows")
 
 primary_dfs, primary_ranges, serial_metadata = _prepare_serial_primary(serial_data)
-st.sidebar.caption("Max timestamp per serial (debug)")
-for key, df in primary_dfs.items():
-    if "DateTime" in df.columns and not df.empty:
-        st.sidebar.write(key, df["DateTime"].max())
-
-debug = primary_dfs.get("250269646")
-if debug is not None and "Humidity" in debug.columns:
-    st.sidebar.write("Last 10 RH rows:")
-    st.sidebar.write(
-        debug.loc[debug["Humidity"].notna(), ["DateTime", "Humidity"]]
-             .tail(10)
-    )
 if not primary_dfs:
     st.sidebar.info("No valid serial data found in the uploaded files.")
     st.stop()
+
+
+st.session_state.setdefault("data_windows", {})
+
+st.sidebar.markdown("### Data Windows (optional)")
+for serial_key, df in primary_dfs.items():
+    if df.empty or "DateTime" not in df.columns:
+        continue
+    min_dt = df["DateTime"].min()
+    max_dt = df["DateTime"].max()
+    if pd.isna(min_dt) or pd.isna(max_dt):
+        continue
+    w_key = f"window::{serial_key}"
+    cur_start, cur_end = st.session_state["data_windows"].get(w_key, (None, None))
+    with st.sidebar.expander(f"{serial_key}", expanded=False):
+        start_default = (
+            cur_start.date() if cur_start else pd.to_datetime(min_dt).date()
+        )
+        end_default = (
+            cur_end.date() if cur_end else pd.to_datetime(max_dt).date()
+        )
+        start_date = st.date_input(
+            "Start",
+            value=start_default,
+            min_value=pd.to_datetime(min_dt).date(),
+            max_value=pd.to_datetime(max_dt).date(),
+            key=f"{w_key}_start",
+        )
+        end_date = st.date_input(
+            "End",
+            value=end_default,
+            min_value=pd.to_datetime(min_dt).date(),
+            max_value=pd.to_datetime(max_dt).date(),
+            key=f"{w_key}_end",
+        )
+    st.session_state["data_windows"][w_key] = (
+        datetime.combine(start_date, datetime.min.time()),
+        datetime.combine(end_date, datetime.max.time()),
+    )
 
 
 def _collect_years_months(dataframes: Dict[str, pd.DataFrame]) -> Tuple[List[int], List[int]]:
@@ -584,6 +625,12 @@ def _build_outputs(
         sel_full = df[
             (df['DateTime'].dt.year == year) & (df['DateTime'].dt.month == month)
         ].sort_values('DateTime').reset_index(drop=True)
+
+    windows = st.session_state.get("data_windows", {})
+    primary_wkey = f"window::{name}"
+    sel_full = _apply_window(sel_full, windows.get(primary_wkey))
+    if not sel_full.empty:
+        sel_full = sel_full.sort_values('DateTime').reset_index(drop=True)
     if sel_full.empty:
         result["warnings"].append("No data for selected period.")
         return result
@@ -613,8 +660,11 @@ def _build_outputs(
                         (probe_copy["DateTime"].dt.year == year)
                         & (probe_copy["DateTime"].dt.month == month)
                     ]
+                w_key = f"window::probe::{comp_name}"
+                probe_copy = _apply_window(probe_copy, windows.get(w_key))
                 if probe_copy.empty:
                     continue
+                probe_copy = probe_copy.sort_values("DateTime").reset_index(drop=True)
                 if "Source" not in probe_copy.columns:
                     probe_label = secondary_labels.get(comp_name, Path(comp_name).stem)
                     probe_copy["Source"] = probe_label
@@ -622,15 +672,12 @@ def _build_outputs(
 
     sel_all_raw = pd.concat(combined_raw, ignore_index=True)
     sel_all_raw = sel_all_raw.sort_values("DateTime").reset_index(drop=True)
-    st.write("OOR sources merged:", len(combined_raw), "datasets")
-
     sel = _downsample(sel_full)
 
     start_date = datetime(year, month, 1)
     end_date = start_date + timedelta(days=calendar.monthrange(year, month)[1] - 1)
 
     for ch in channels:
-        st.write("DEBUG — OOR rows for", name, ch, len(sel))
         channel_info = {
             "chart": None,
             "warning": None,
@@ -647,14 +694,6 @@ def _build_outputs(
             channel_info["warning"] = f"Channel {ch} not found in data."
             result["channel_results"][ch] = channel_info
             continue
-
-        if ch in sel_raw.columns:
-            st.write(
-                "DEBUG RH raw max/min for",
-                ch,
-                sel_raw[ch].min(),
-                sel_raw[ch].max(),
-            )
 
         series_frames = []
         probe_legends = []
@@ -681,6 +720,10 @@ def _build_outputs(
                 (comp_df['Date'].dt.year == year)
                 & (comp_df['Date'].dt.month == month)
             ].sort_values('DateTime').reset_index(drop=True)
+            w_key = f"window::probe::{comp_name}"
+            comp_sel_full = _apply_window(comp_sel_full, windows.get(w_key))
+            if not comp_sel_full.empty:
+                comp_sel_full = comp_sel_full.sort_values('DateTime').reset_index(drop=True)
             if comp_sel_full.empty:
                 continue
             comp_sel = _downsample(comp_sel_full)
@@ -1016,6 +1059,84 @@ for tab, name in zip(tabs, serial_keys):
             st.info("Assign probe datasets in the sidebar to overlay them with this serial.")
         else:
             st.caption("No probe datasets uploaded.")
+
+        with st.expander("Data windows (this tab)", expanded=False):
+            primary_wkey = f"window::{name}"
+            df_primary = primary_dfs[name]
+            if "DateTime" in df_primary.columns and not df_primary.empty:
+                p_min = df_primary["DateTime"].min()
+                p_max = df_primary["DateTime"].max()
+                if not (pd.isna(p_min) or pd.isna(p_max)):
+                    cur_primary = st.session_state["data_windows"].get(
+                        primary_wkey, (None, None)
+                    )
+                    p_start = st.date_input(
+                        "Primary start",
+                        value=(
+                            cur_primary[0].date()
+                            if cur_primary[0]
+                            else pd.to_datetime(p_min).date()
+                        ),
+                        min_value=pd.to_datetime(p_min).date(),
+                        max_value=pd.to_datetime(p_max).date(),
+                        key=f"{primary_wkey}_start_tab",
+                    )
+                    p_end = st.date_input(
+                        "Primary end",
+                        value=(
+                            cur_primary[1].date()
+                            if cur_primary[1]
+                            else pd.to_datetime(p_max).date()
+                        ),
+                        min_value=pd.to_datetime(p_min).date(),
+                        max_value=pd.to_datetime(p_max).date(),
+                        key=f"{primary_wkey}_end_tab",
+                    )
+                    st.session_state["data_windows"][primary_wkey] = (
+                        datetime.combine(p_start, datetime.min.time()),
+                        datetime.combine(p_end, datetime.max.time()),
+                    )
+
+            for comp_name in selected_probe_overlays:
+                comp_df = probe_dfs.get(comp_name)
+                if (
+                    comp_df is None
+                    or comp_df.empty
+                    or "DateTime" not in comp_df.columns
+                ):
+                    continue
+                cmin = comp_df["DateTime"].min()
+                cmax = comp_df["DateTime"].max()
+                if pd.isna(cmin) or pd.isna(cmax):
+                    continue
+                w_key = f"window::probe::{comp_name}"
+                cur_window = st.session_state["data_windows"].get(w_key, (None, None))
+                comp_start = st.date_input(
+                    f"{comp_name} start",
+                    value=(
+                        cur_window[0].date()
+                        if cur_window[0]
+                        else pd.to_datetime(cmin).date()
+                    ),
+                    min_value=pd.to_datetime(cmin).date(),
+                    max_value=pd.to_datetime(cmax).date(),
+                    key=f"{w_key}_start",
+                )
+                comp_end = st.date_input(
+                    f"{comp_name} end",
+                    value=(
+                        cur_window[1].date()
+                        if cur_window[1]
+                        else pd.to_datetime(cmax).date()
+                    ),
+                    min_value=pd.to_datetime(cmin).date(),
+                    max_value=pd.to_datetime(cmax).date(),
+                    key=f"{w_key}_end",
+                )
+                st.session_state["data_windows"][w_key] = (
+                    datetime.combine(comp_start, datetime.min.time()),
+                    datetime.combine(comp_end, datetime.max.time()),
+                )
 
         tempstick_files = st.file_uploader(
             "Upload Tempstick CSV files (optional)",
