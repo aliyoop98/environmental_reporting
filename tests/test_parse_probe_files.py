@@ -129,15 +129,15 @@ def test_parse_serial_csv_extracts_unique_serials():
 
     serials = parse_serial_csv([file_obj])
 
-    key_a = "serials.csv - Chamber 1 [SN-A]"
-    key_b = "serials.csv - Chamber 2 [SN-B]"
+    key_a = "SN-A"
+    key_b = "SN-B"
 
     assert key_a in serials
     assert key_b in serials
 
     info_a = serials[key_a]
     df_a = info_a['df']
-    assert list(df_a.columns) == ["Date", "Time", "DateTime", "Temperature", "Humidity"]
+    assert list(df_a.columns) == ["DateTime", "Temperature", "Humidity", "Date", "Time"]
     assert info_a['serial'] == "SN-A"
     assert info_a['default_label'] in {"Chamber 1", "SN-A"}
 
@@ -156,7 +156,7 @@ def test_serial_data_to_primary_uses_datetime_dates():
     serials = parse_serial_csv([file_obj])
     primary_dfs, primary_ranges = serial_data_to_primary(serials)
 
-    key = "serial_primary.csv [SN-10]"
+    key = "SN-10"
     assert key in primary_dfs
     df_primary = primary_dfs[key]
 

@@ -39,6 +39,7 @@ def _parse_ts(value: object) -> pd.Timestamp:
         "%Y/%m/%d %H:%M:%S",
         "%m/%d/%Y %H:%M",
         "%m/%d/%Y %H:%M:%S",
+        "%Y-%b-%d %H:%M",
     ):
         try:
             return pd.to_datetime(text, format=fmt)
@@ -65,6 +66,10 @@ def _infer_profile_from_name(*candidates: Optional[str]) -> Optional[str]:
         return "Fridge"
     if "room" in text or "area" in text:
         return "Room"
+    if "olympus room" in text:
+        return "Olympus Room"
+    if "olympus" in text:
+        return "Olympus"
     return None
 
 
@@ -253,9 +258,8 @@ def _infer_temperature_range(
 def _parse_traceable_report_csv(
     text: str,
     source_name: str,
-    default_temp_range: Tuple[float, float],
 ) -> List[Dict[str, object]]:
-    """Parse Traceable Live per-asset report CSVs."""
+    """Parse Traceable Live single-serial report CSVs into the unified schema."""
 
     extracted = _extract_report_blocks(text)
     if not extracted:
@@ -269,6 +273,7 @@ def _parse_traceable_report_csv(
                 io.StringIO(csv_text),
                 engine="python",
                 on_bad_lines="skip",
+                dtype=str,
             )
         except Exception:
             continue
@@ -286,71 +291,98 @@ def _parse_traceable_report_csv(
     normalized_cols = {
         _normalize_header(col): col for col in df.columns if isinstance(col, str)
     }
-    timestamp_col = normalized_cols.get("timestamp")
-    data_col = normalized_cols.get("data")
+
+    def _find_column(*candidates: str) -> Optional[str]:
+        for candidate in candidates:
+            if candidate in normalized_cols:
+                return normalized_cols[candidate]
+        return None
+
+    timestamp_col = _find_column("timestamp", "time stamp", "date time")
+    data_col = _find_column("data", "value", "reading")
+    channel_col = _find_column("channel", "sensor", "channel name")
+    unit_col = _find_column("unit of measure", "unit", "units")
+
     if not timestamp_col or not data_col:
         return []
 
-    df = df.rename(columns={timestamp_col: "Timestamp", data_col: "Data"})
+    rename_map = {timestamp_col: "Timestamp", data_col: "Data"}
+    if channel_col:
+        rename_map[channel_col] = "Channel"
+    if unit_col:
+        rename_map[unit_col] = "Unit"
+    df = df.rename(columns=rename_map)
+
+    range_columns = [
+        original
+        for normalised, original in normalized_cols.items()
+        if normalised.startswith("range")
+    ]
+    if range_columns:
+        df = df.drop(columns=[col for col in range_columns if col in df.columns])
+
+    if "Channel" not in df.columns:
+        df["Channel"] = ""
+    if "Unit" not in df.columns:
+        df["Unit"] = ""
+
+    df["Channel"] = df["Channel"].astype("string").fillna("").str.strip()
+    df["Unit"] = df["Unit"].astype("string").fillna("").str.strip()
 
     data_cleaned = (
         df["Data"].astype("string")
-        .str.replace(r"[^0-9\.\-]", "", regex=True)
-        .replace({"": pd.NA})
+        .str.extract(r"([-+]?\d*\.?\d+)")[0]
+        .astype("string")
     )
     df["Value"] = pd.to_numeric(data_cleaned, errors="coerce")
     df["DateTime"] = df["Timestamp"].apply(_parse_ts)
 
-    if "Channel" in df.columns:
-        df["Channel"] = df["Channel"].astype("string").str.strip()
-    else:
-        df["Channel"] = ""
+    block_labels = (
+        df.pop("__block_label") if "__block_label" in df.columns else pd.Series()
+    )
+    if block_labels.empty:
+        block_labels = pd.Series(["" for _ in range(len(df))], index=df.index)
 
-    def _infer_block_channel(label: str) -> Optional[str]:
-        text = (label or "").lower()
-        text = re.sub(r"[^a-z0-9]+", " ", text)
-        text = " ".join(text.split())
-        if not text:
-            return None
-        if "sensor" in text:
-            tokens = text.split()
-            for idx, token in enumerate(tokens):
-                if token == "sensor" and idx + 1 < len(tokens):
-                    sensor_id = tokens[idx + 1]
-                    if sensor_id in {"1", "01"}:
-                        return "Humidity"
-                    if sensor_id in {"2", "02"}:
-                        return "Temperature"
-        if any(term in text for term in ("humidity", "humid", "rh")):
-            return "Humidity"
-        if any(term in text for term in ("temp", "temperature", "°c", "°f")):
-            return "Temperature"
+    def _resolve_measurement(channel: str, unit: str, context: str) -> Optional[str]:
+        measurement = _classify_measurement(channel, unit)
+        if measurement:
+            return measurement
+        if context:
+            measurement = _classify_measurement(context, unit)
+            if measurement:
+                return measurement
+        if unit:
+            return _classify_measurement("", unit)
         return None
 
-    block_labels = df.pop("__block_label") if "__block_label" in df.columns else pd.Series()
-    if not block_labels.empty:
-        inferred = block_labels.apply(_infer_block_channel)
-        df["Channel"] = df["Channel"].where(df["Channel"].astype(str).str.strip().astype(bool), None)
-        df["Channel"] = df["Channel"].where(df["Channel"].notna(), inferred)
-    df["Channel"] = df["Channel"].fillna("")
-    if len(blocks) == 1:
-        mask_blank = df["Channel"].astype(str).str.strip() == ""
-        if mask_blank.any():
-            df.loc[mask_blank, "Channel"] = "Temperature"
+    measurement_values = [
+        _resolve_measurement(channel, unit, context)
+        for channel, unit, context in zip(
+            df["Channel"].astype("string"),
+            df["Unit"].astype("string"),
+            block_labels.astype("string"),
+        )
+    ]
+    measurement_series = pd.Series(measurement_values, index=df.index, dtype="string")
+    if measurement_series.notna().sum() == 0:
+        measurement_series = pd.Series(
+            ["Temperature"] * len(df), index=df.index, dtype="string"
+        )
+    else:
+        known = [value for value in measurement_series.dropna().unique() if value]
+        if len(known) == 1:
+            measurement_series = measurement_series.fillna(known[0])
+    df["Measurement"] = measurement_series
 
     df = df.dropna(subset=["DateTime", "Value"], how="any")
-    df = df[df["Channel"].astype(str).str.strip() != ""]
-    if df.empty:
-        return []
-
-    df = df[df["Channel"].isin({"Temperature", "Humidity"})]
+    df = df[df["Measurement"].astype(str).str.strip() != ""]
     if df.empty:
         return []
 
     wide = (
         df.pivot_table(
             index="DateTime",
-            columns="Channel",
+            columns="Measurement",
             values="Value",
             aggfunc="mean",
         )
@@ -359,40 +391,219 @@ def _parse_traceable_report_csv(
         .sort_values("DateTime")
     )
 
-    for col in ("Temperature", "Humidity"):
-        if col not in wide.columns:
-            wide[col] = pd.NA
+    for column in ("Temperature", "Humidity"):
+        if column not in wide.columns:
+            wide[column] = pd.NA
 
     wide["Date"] = wide["DateTime"].dt.date
     wide["Time"] = wide["DateTime"].dt.strftime("%H:%M")
     out = _finalize_serial_dataframe(wide)
 
     device_id = (meta.get("device_id") or "").strip()
-    serial = device_id
-    default_label = device_id or Path(source_name).stem
-    key = f"{source_name} [{serial}]" if serial else source_name
+    device_name = (meta.get("device_name") or "").strip()
+    serial = device_id or device_name or Path(source_name).stem
+    default_label = device_name or serial
+    option_label = device_name or Path(source_name).stem
 
-    context = _normalise_context_text(source_name, meta.get("device_name"))
-    temp_range = _infer_temperature_range(context, default_temp_range)
     range_map: Dict[str, Tuple[float, float]] = {}
-    range_map["Temperature"] = temp_range
-    range_map.setdefault("Humidity", DEFAULT_HUMIDITY_RANGE)
-    _apply_inferred_ranges(range_map, source_name, meta.get("device_name"), device_id)
+    _apply_inferred_ranges(range_map, source_name, device_name, device_id)
 
-    channels = [col for col in ("Temperature", "Humidity") if col in out.columns]
+    channels = [
+        column
+        for column in ("Temperature", "Humidity")
+        if column in out.columns and column in wide.columns
+    ]
 
     return [
         {
-            "key": key,
             "df": out,
+            "serial": str(serial),
             "range_map": range_map,
-            "serial": serial,
             "default_label": default_label,
-            "option_label": "",
+            "option_label": option_label,
             "source_name": source_name,
             "channels": channels,
         }
     ]
+
+
+def _looks_like_traceable_report(text: str) -> bool:
+    if not text:
+        return False
+    lines = [
+        _strip_bom_and_zero_width(line)
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return False
+    has_device = any("device id:" in line.lower() for line in lines[:40])
+    if not has_device:
+        return False
+    return any(
+        "timestamp" in line.lower() and "data" in line.lower() for line in lines
+    )
+
+
+def _looks_like_consolidated(text: str) -> bool:
+    if not text:
+        return False
+    for line in text.splitlines()[:50]:
+        lowered = _strip_bom_and_zero_width(line).lower()
+        if "serial number" in lowered and "channel" in lowered:
+            return True
+    return False
+
+
+def _parse_consolidated_serial_csv(
+    text: str,
+    source_name: str,
+) -> List[Dict[str, object]]:
+    """Parse Traceable Live consolidated CSVs into the unified schema."""
+
+    try:
+        df = pd.read_csv(
+            io.StringIO(text),
+            engine="python",
+            on_bad_lines="skip",
+            dtype=str,
+            low_memory=False,
+        )
+    except Exception:
+        return []
+
+    if df.empty:
+        return []
+
+    df = _clean_chunk_columns(df)
+
+    normalized_cols = {
+        _normalize_header(col): col for col in df.columns if isinstance(col, str)
+    }
+
+    def _find_column(*candidates: str) -> Optional[str]:
+        for candidate in candidates:
+            if candidate in normalized_cols:
+                return normalized_cols[candidate]
+        return None
+
+    timestamp_col = _find_column("timestamp", "time stamp", "date time")
+    serial_col = _find_column("serial number", "serial")
+    channel_col = _find_column("channel", "sensor", "channel name")
+    data_col = _find_column("data", "value", "reading")
+    unit_col = _find_column("unit of measure", "unit", "units")
+
+    if not all([timestamp_col, serial_col, channel_col, data_col]):
+        return []
+
+    rename_map = {
+        timestamp_col: "Timestamp",
+        serial_col: "Serial Number",
+        channel_col: "Channel",
+        data_col: "Data",
+    }
+    if unit_col:
+        rename_map[unit_col] = "Unit of Measure"
+
+    df = df.rename(columns=rename_map)
+
+    for column in ["Timestamp", "Serial Number", "Channel", "Data"]:
+        if column not in df.columns:
+            df[column] = ""
+    if "Unit of Measure" not in df.columns:
+        df["Unit of Measure"] = ""
+
+    df["Timestamp"] = df["Timestamp"].astype("string").fillna("").str.strip()
+    df["Serial Number"] = df["Serial Number"].astype("string").fillna("").str.strip()
+    df["Channel"] = df["Channel"].astype("string").fillna("").str.strip()
+    df["Unit of Measure"] = (
+        df["Unit of Measure"].astype("string").fillna("").str.strip()
+    )
+    df["Data"] = df["Data"].astype("string").fillna("")
+
+    df["DateTime"] = df["Timestamp"].apply(_parse_ts)
+    df = df.dropna(subset=["DateTime"])
+    df = df[df["Serial Number"].astype(str).str.strip() != ""]
+
+    data_cleaned = df["Data"].str.extract(r"([-+]?\d*\.?\d+)")[0]
+    df["Value"] = pd.to_numeric(data_cleaned, errors="coerce")
+    df = df.dropna(subset=["Value"])
+
+    measurement_series = [
+        _classify_measurement(channel, unit)
+        or _classify_measurement("", unit)
+        for channel, unit in zip(df["Channel"], df["Unit of Measure"])
+    ]
+    df["Measurement"] = pd.Series(measurement_series, index=df.index, dtype="string")
+    df = df[df["Measurement"].astype(str).str.strip() != ""]
+    if df.empty:
+        return []
+
+    space_name_column = _find_column_by_terms(df.columns, _SPACE_NAME_HINTS)
+    space_type_column = _find_column_by_terms(df.columns, _SPACE_TYPE_HINTS)
+
+    results: List[Dict[str, object]] = []
+    for serial, group in df.groupby("Serial Number"):
+        if not str(serial).strip():
+            continue
+
+        wide = (
+            group.pivot_table(
+                index="DateTime",
+                columns="Measurement",
+                values="Value",
+                aggfunc="mean",
+            )
+            .reset_index()
+            .rename_axis(None, axis=1)
+            .sort_values("DateTime")
+        )
+
+        for column in ("Temperature", "Humidity"):
+            if column not in wide.columns:
+                wide[column] = pd.NA
+
+        wide["Date"] = wide["DateTime"].dt.date
+        wide["Time"] = wide["DateTime"].dt.strftime("%H:%M")
+        out = _finalize_serial_dataframe(wide)
+
+        hints: List[Optional[str]] = [source_name, str(serial)]
+        if space_name_column and space_name_column in group.columns:
+            cleaned = _clean_metadata_series(group[space_name_column])
+            non_blank = cleaned[cleaned.astype(str).str.strip().astype(bool)]
+            if not non_blank.empty:
+                hints.append(non_blank.iloc[0])
+        if space_type_column and space_type_column in group.columns:
+            cleaned = _clean_metadata_series(group[space_type_column])
+            non_blank = cleaned[cleaned.astype(str).str.strip().astype(bool)]
+            if not non_blank.empty:
+                hints.append(non_blank.iloc[0])
+
+        range_map: Dict[str, Tuple[float, float]] = {}
+        _apply_inferred_ranges(range_map, *hints)
+
+        channels = [
+            column
+            for column in ("Temperature", "Humidity")
+            if column in out.columns and column in wide.columns
+        ]
+
+        default_label = str(serial)
+        option_label = str(serial)
+
+        results.append(
+            {
+                "df": out,
+                "serial": str(serial),
+                "range_map": range_map,
+                "default_label": default_label,
+                "option_label": option_label,
+                "source_name": source_name,
+                "channels": channels,
+            }
+        )
+
+    return results
 
 NEW_SCHEMA_ALIASES: Mapping[str, Tuple[str, ...]] = {
     'Timestamp': (
@@ -679,6 +890,14 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
 
     channel = (channel or '').strip().lower()
     unit = (unit or '').strip().lower()
+
+    sensor_match = re.search(r'sensor\s*0*(\d+)', channel)
+    if sensor_match:
+        sensor_id = sensor_match.group(1)
+        if sensor_id == '1':
+            return 'Humidity'
+        if sensor_id == '2':
+            return 'Temperature'
 
     # Normalise the unit text so we can reliably inspect the tokens regardless of
     # punctuation, case, or unicode symbols (e.g. "°F").
@@ -1037,67 +1256,128 @@ def _parse_probe_files(files):
     return dfs, ranges
 
 
+
 def parse_serial_csv(files):
     serials: Dict[str, Dict[str, object]] = {}
     if not files:
         return serials
-    default_temp_range = DEFAULT_TEMP_RANGE
-    default_humidity_range = DEFAULT_HUMIDITY_RANGE
+
+    merged_frames: Dict[str, pd.DataFrame] = {}
+
     for f in files:
         try:
             f.seek(0)
         except Exception:
             pass
-        raw_bytes = f.read()
-        if isinstance(raw_bytes, str):
-            full_content = raw_bytes
+
+        raw_content = f.read()
+        if isinstance(raw_content, bytes):
+            full_text = raw_content.decode('utf-8', errors='ignore')
         else:
-            full_content = raw_bytes.decode('utf-8', errors='ignore')
-        report_groups = _parse_traceable_report_csv(
-            full_content,
-            f.name,
-            default_temp_range,
-        )
-        if report_groups:
-            for group in report_groups:
-                key = group.get('key', f.name)  # type: ignore[index]
-                serials[key] = {
-                    'df': group.get('df'),  # type: ignore[index]
-                    'range_map': group.get('range_map', {}),  # type: ignore[index]
-                    'serial': group.get('serial', ''),  # type: ignore[index]
-                    'default_label': group.get('default_label', ''),  # type: ignore[index]
-                    'option_label': group.get('option_label', ''),  # type: ignore[index]
-                    'source_name': group.get('source_name', f.name),  # type: ignore[index]
-                    'channels': group.get('channels', []),  # type: ignore[index]
-                }
-            continue
-        chunk_results = _parse_consolidated_serial_text(
-            full_content,
-            f.name,
-            default_temp_range,
-            default_humidity_range,
-        )
-        if not chunk_results:
-            df_full = _read_csv_flexible(full_content)
-            if df_full is None:
+            full_text = str(raw_content)
+
+        source_name = getattr(f, 'name', 'serial.csv') or 'serial.csv'
+
+        parsed_items: List[Dict[str, object]] = []
+        if _looks_like_traceable_report(full_text):
+            parsed_items = _parse_traceable_report_csv(full_text, source_name)
+        elif _looks_like_consolidated(full_text):
+            parsed_items = _parse_consolidated_serial_csv(full_text, source_name)
+        else:
+            parsed_items = _parse_consolidated_serial_csv(full_text, source_name)
+            if not parsed_items:
+                parsed_items = _parse_traceable_report_csv(full_text, source_name)
+
+        if not parsed_items:
+            df_full = _read_csv_flexible(full_text)
+            if df_full is not None:
+                fallback_groups = _process_new_schema_df(
+                    df_full,
+                    source_name,
+                    DEFAULT_TEMP_RANGE,
+                    DEFAULT_HUMIDITY_RANGE,
+                )
+                parsed_items.extend(
+                    {
+                        'df': group['df'],
+                        'serial': group.get('serial'),
+                        'range_map': group.get('range_map', {}),
+                        'default_label': group.get('default_label'),
+                        'option_label': group.get('option_label'),
+                        'source_name': group.get('source_name', source_name),
+                        'channels': group.get('channels', []),
+                    }
+                    for group in fallback_groups
+                )
+
+        for item in parsed_items:
+            df = item.get('df')
+            if not isinstance(df, pd.DataFrame) or df.empty:
                 continue
-            groups = _process_new_schema_df(
-                df_full, f.name, default_temp_range, default_humidity_range
+
+            serial_value = item.get('serial')
+            if serial_value is None or str(serial_value).strip() == '':
+                serial_value = item.get('default_label') or Path(source_name).stem
+            serial_key = str(serial_value)
+
+            merged_df = merge_serial_data(merged_frames, df, serial_key)
+
+            existing = serials.get(serial_key)
+            range_map: Dict[str, Tuple[float, float]] = {}
+            channels: List[str] = []
+            source_parts: List[str] = []
+
+            if existing:
+                if isinstance(existing.get('range_map'), dict):
+                    range_map.update(existing['range_map'])  # type: ignore[arg-type]
+                channels.extend(
+                    [ch for ch in existing.get('channels', []) if isinstance(ch, str)]
+                )
+                existing_source = existing.get('source_name')
+                if isinstance(existing_source, str):
+                    source_parts.extend(
+                        [part.strip() for part in existing_source.split(',') if part.strip()]
+                    )
+            if isinstance(item.get('range_map'), dict):
+                range_map.update(item['range_map'])  # type: ignore[arg-type]
+            channels.extend([ch for ch in item.get('channels', []) if isinstance(ch, str)])
+            channels = list(dict.fromkeys(channels))
+
+            item_source = item.get('source_name')
+            if isinstance(item_source, str):
+                source_parts.extend(
+                    [part.strip() for part in item_source.split(',') if part.strip()]
+                )
+            source_name_combined = ', '.join(dict.fromkeys(source_parts)) if source_parts else item.get('source_name') or source_name
+
+            _apply_inferred_ranges(
+                range_map,
+                source_name_combined,
+                str(serial_value) if serial_value is not None else None,
+                item.get('default_label'),
             )
-            for group in groups:
-                key = group['key']  # type: ignore[index]
-                serials[key] = {
-                    'df': _finalize_serial_dataframe(group['df']),  # type: ignore[index]
-                    'range_map': group['range_map'],  # type: ignore[index]
-                    'serial': group['serial'],  # type: ignore[index]
-                    'default_label': group['default_label'],  # type: ignore[index]
-                    'option_label': group['option_label'],  # type: ignore[index]
-                    'source_name': group['source_name'],  # type: ignore[index]
-                    'channels': group['channels'],  # type: ignore[index]
-                }
-            continue
-        for key, info in chunk_results.items():
-            serials[key] = info
+
+            default_label = (
+                (existing.get('default_label') if existing else None)
+                or item.get('default_label')
+                or serial_key
+            )
+            option_label = (
+                (existing.get('option_label') if existing else None)
+                or item.get('option_label')
+                or default_label
+            )
+
+            serials[serial_key] = {
+                'df': merged_df,
+                'range_map': range_map,
+                'serial': str(serial_value),
+                'default_label': default_label,
+                'option_label': option_label,
+                'source_name': source_name_combined,
+                'channels': channels,
+            }
+
     return serials
 
 
@@ -1218,5 +1498,12 @@ def merge_serial_data(existing: dict, new_df, serial: str):
             merged["Time"] = pd.to_datetime(merged["DateTime"]).dt.strftime("%H:%M")
 
     result = merged.reset_index(drop=True)
+    preferred_order = ["DateTime", "Temperature", "Humidity", "Date", "Time"]
+    ordered_cols = [col for col in preferred_order if col in result.columns]
+    other_cols = [col for col in result.columns if col not in ordered_cols]
+    if ordered_cols and (len(ordered_cols) != len(result.columns)):
+        result = result[ordered_cols + other_cols]
+    elif ordered_cols:
+        result = result[ordered_cols]
     existing[serial] = result
     return result
