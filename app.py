@@ -358,6 +358,12 @@ if serial_files:
             st.sidebar.error(f"Failed to parse {uploaded.name}")
             st.sidebar.exception(exc)
             parsed = {}
+
+        if not parsed:
+            st.sidebar.warning(
+                f"File {uploaded.name} contained no recognized rows."
+            )
+            continue
         for key, info in parsed.items():
             if not isinstance(info, dict):
                 serial_data[key] = info
@@ -406,6 +412,9 @@ else:
     st.sidebar.info("Upload consolidated serial CSV files to begin.")
 
 if not serial_data:
+    st.sidebar.warning(
+        "No recognized rows in uploaded serial CSVs. Make sure files are 'Report' or 'Consolidated' Traceable exports."
+    )
     st.stop()
 
 if total_rows > 2_000_000:
