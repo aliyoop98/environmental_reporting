@@ -236,8 +236,10 @@ def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
-def _extract_report_blocks(text: str) -> Optional[Tuple[Dict[str, Optional[str]], List[pd.DataFrame]]]:
-    """Return metadata and all timestamp blocks from a Traceable report text."""
+def _extract_report_blocks(
+    text: str,
+) -> Optional[Tuple[Dict[str, Optional[str]], List[Tuple[pd.DataFrame, str]]]]:
+    """Return metadata and timestamp blocks with their surrounding context."""
 
     if not text:
         return None
@@ -264,7 +266,7 @@ def _extract_report_blocks(text: str) -> Optional[Tuple[Dict[str, Optional[str]]
     if not header_idxs:
         return None
 
-    blocks: List[pd.DataFrame] = []
+    blocks: List[Tuple[pd.DataFrame, str]] = []
     for start in header_idxs:
         end = len(lines)
         for pos in range(start + 1, len(lines)):
@@ -272,6 +274,20 @@ def _extract_report_blocks(text: str) -> Optional[Tuple[Dict[str, Optional[str]]
             if lowered.startswith("channel data for") or pos in header_idxs:
                 end = pos
                 break
+
+        context_lines: List[str] = []
+        for pos in range(start - 1, -1, -1):
+            candidate = lines[pos].strip()
+            if not candidate:
+                if context_lines:
+                    break
+                continue
+            context_lines.append(candidate)
+            lowered = candidate.lower()
+            if lowered.startswith("channel data for") or lowered.startswith("channel"):
+                break
+        context_lines.reverse()
+        context_text = " ".join(context_lines)
 
         rows = [lines[start]]
         for line in lines[start + 1 : end]:
@@ -291,7 +307,7 @@ def _extract_report_blocks(text: str) -> Optional[Tuple[Dict[str, Optional[str]]
         except Exception:
             continue
         frame.columns = [re.sub(r"\s+", " ", (col or "")).strip() for col in frame.columns]
-        blocks.append(frame)
+        blocks.append((frame, context_text))
 
     if not blocks:
         return None
@@ -504,34 +520,47 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     if not res:
         return []
 
-    meta, frames = res
-    if not frames:
+    meta, frame_infos = res
+    if not frame_infos:
         return []
 
-    df = pd.concat(frames, ignore_index=True)
-    normalized = {
-        re.sub(r"\s+", " ", (col or "")).strip().lower(): col
-        for col in df.columns
-    }
+    parsed_frames: List[pd.DataFrame] = []
+    for frame, context_text in frame_infos:
+        if frame is None or frame.empty:
+            continue
 
-    def _find_column(*aliases: str) -> Optional[str]:
-        for alias in aliases:
-            key = re.sub(r"\s+", " ", alias).strip().lower()
-            if key in normalized:
-                return normalized[key]
-        return None
+        normalized = {
+            re.sub(r"\s+", " ", (col or "")).strip().lower(): col
+            for col in frame.columns
+        }
 
-    timestamp_col = _find_column("timestamp", "time stamp", "date time")
-    data_col = _find_column("data", "value", "reading")
-    unit_col = _find_column("unit", "unit of measure", "units")
-    if not timestamp_col or not data_col:
+        def _find_column(*aliases: str) -> Optional[str]:
+            for alias in aliases:
+                key = re.sub(r"\s+", " ", alias).strip().lower()
+                if key in normalized:
+                    return normalized[key]
+            return None
+
+        timestamp_col = _find_column("timestamp", "time stamp", "date time")
+        data_col = _find_column("data", "value", "reading")
+        unit_col = _find_column("unit", "unit of measure", "units")
+        if not timestamp_col or not data_col:
+            continue
+
+        local = frame.rename(columns={timestamp_col: "Timestamp", data_col: "Data"})
+        if unit_col:
+            local = local.rename(columns={unit_col: "Unit"})
+        else:
+            local["Unit"] = ""
+
+        local["Context"] = context_text
+        local["DataColumnLabel"] = data_col
+        parsed_frames.append(local)
+
+    if not parsed_frames:
         return []
 
-    df = df.rename(columns={timestamp_col: "Timestamp", data_col: "Data"})
-    if unit_col:
-        df = df.rename(columns={unit_col: "Unit"})
-    else:
-        df["Unit"] = ""
+    df = pd.concat(parsed_frames, ignore_index=True)
 
     df["DateTime"] = df["Timestamp"].apply(_parse_ts_safe)
     df = df.dropna(subset=["DateTime"])
@@ -545,19 +574,34 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     if df.empty:
         return []
 
-    if "Unit" in df.columns:
-        unit_series = df["Unit"].astype(str).str.strip()
-        df["Kind"] = unit_series.map(lambda u: "Humidity" if "%" in u else "Temperature")
-    else:
-        df["Kind"] = "Temperature"
-
-    data_text = df["Data"].astype(str)
-    df.loc[
-        df["Kind"] == "Temperature",
-        "Kind",
-    ] = df.loc[df["Kind"] == "Temperature", "Kind"].where(
-        ~data_text.str.contains("%"), "Humidity"
+    channel_hints = (
+        df[["Context", "DataColumnLabel"]]
+        .astype(str)
+        .fillna("")
+        .agg(" ".join, axis=1)
+        .str.strip()
     )
+    unit_series = df["Unit"].astype(str).fillna("")
+    data_text = df["Data"].astype(str).fillna("")
+
+    def _infer_kind(channel_text: str, unit_text: str, data_str: str) -> str:
+        measurement = _classify_measurement(channel_text, unit_text)
+        if measurement:
+            return measurement
+
+        lowered = channel_text.lower()
+        if any(term in lowered for term in ("humidity", "relative humidity", "rh")):
+            return "Humidity"
+
+        if "%" in unit_text or "%" in data_str:
+            return "Humidity"
+
+        return "Temperature"
+
+    df["Kind"] = [
+        _infer_kind(channel, unit, data)
+        for channel, unit, data in zip(channel_hints, unit_series, data_text)
+    ]
 
     pivot = (
         df.pivot_table(
