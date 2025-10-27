@@ -116,6 +116,7 @@ PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
     "Area": {"temp": (15.0, 25.0), "humi": (0.0, 60.0)},
     "Olympus": {"temp": (15.0, 28.0), "humi": (0.0, 80.0)},
     "Olympus Room": {"temp": (15.0, 28.0), "humi": (0.0, 80.0)},
+    "Freezer -80": {"temp": (-86.0, -70.0), "humi": None},
 }
 
 
@@ -155,6 +156,22 @@ def _infer_profile_from_name(*candidates: Optional[str]) -> Optional[str]:
     if not pieces:
         return None
     text = " ".join(pieces).lower()
+    if any(
+        key in text
+        for key in [
+            "-80",
+            "−80",
+            "minus80",
+            "minus 80",
+            "ultra low",
+            "ultra-low",
+            "ultralow",
+            "ulf",
+            "ult",
+            "ultrafreezer",
+        ]
+    ):
+        return "Freezer -80"
     if "freezer" in text:
         return "Freezer"
     if "fridge" in text or "refrigerator" in text:

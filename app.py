@@ -125,6 +125,7 @@ PROFILE_OPTIONS = [
     "Auto",
     "Fridge",
     "Freezer",
+    "Freezer -80",
     "Olympus",
     "Olympus Room",
     "Room",
@@ -133,6 +134,7 @@ PROFILE_OPTIONS = [
 PROFILE_TEMP_RANGES: Dict[str, Tuple[float, float]] = {
     "Fridge": (2.0, 8.0),
     "Freezer": (-35.0, -5.0),
+    "Freezer -80": (-86.0, -70.0),
     "Olympus": (15.0, 28.0),
     "Olympus Room": (15.0, 25.0),
     "Room": (15.0, 25.0),
