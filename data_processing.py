@@ -443,23 +443,30 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
         df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
     ).astype(float)
 
-    def _kind_row(row: pd.Series) -> str:
-        unit_text = (row.get("Unit") or "").strip().lower()
+    def _infer_kind(row: pd.Series) -> str:
+        unit_value = row.get("Unit of Measure") or row.get("Unit") or ""
+        unit_text = str(unit_value).strip().lower()
         channel_text = str(row.get("Channel", "")).strip().lower()
+        source_pieces = [
+            source_name,
+            row.get("__source_name__", ""),
+            row.get("Serial", ""),
+            row.get("Space Name", ""),
+            row.get("Space Type", ""),
+        ]
+        source_context = " ".join(str(piece) for piece in source_pieces if piece).lower()
 
+        if "°c" in unit_text or unit_text.endswith("c"):
+            return "Temperature"
         if "%" in unit_text:
             return "Humidity"
-        if "c" in unit_text or "°c" in unit_text:
-            return "Temperature"
 
-        profile_hint = _infer_profile_from_name(
-            source_name,
-            row.get("Serial"),
-            row.get("Space Name"),
-            row.get("Space Type"),
-        )
-        if profile_hint == "Freezer -80" and channel_text in {"sensor1", "sensor 1"}:
-            return "Temperature"
+        if any(
+            hint in source_context
+            for hint in ["-80", "−80", "ultra low", "ultra-low", "ultralow", "ult", "ulf"]
+        ):
+            if channel_text in {"sensor1", "sensor 1"}:
+                return "Temperature"
 
         if channel_text in {"sensor1", "sensor 1"}:
             return "Humidity"
@@ -468,7 +475,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
 
         return "Temperature"
 
-    df["Kind"] = df.apply(_kind_row, axis=1)
+    df["Kind"] = df.apply(_infer_kind, axis=1)
 
     df = df.dropna(subset=["Value"])
     if df.empty:
