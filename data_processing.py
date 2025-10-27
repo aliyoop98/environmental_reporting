@@ -856,56 +856,81 @@ def _match_new_schema_columns(columns: Iterable[str]) -> Optional[Dict[str, str]
 
 
 def _classify_measurement(channel: str, unit: str) -> Optional[str]:
-    """Return canonical measurement name based on channel/unit metadata."""
+    """Return canonical measurement name using unit, hints, then sensor fallback."""
 
-    channel = (channel or '').strip().lower()
-    unit = (unit or '').strip().lower()
-
-    sensor_match = re.search(r'sensor\s*0*(\d+)', channel)
-    if sensor_match:
-        sensor_id = sensor_match.group(1)
-        if sensor_id == '1':
-            return 'Humidity'
-        if sensor_id == '2':
-            return 'Temperature'
+    channel = (channel or "").strip().lower()
+    unit = (unit or "").strip().lower()
 
     # Normalise the unit text so we can reliably inspect the tokens regardless of
-    # punctuation, case, or unicode symbols (e.g. "°F").
+    # punctuation, case, or unicode symbols (e.g. "Â°C").
+    unit_fixed = unit.replace("Â°", "°")
     unit_normalised = (
-        unit.replace('°', ' ')
-        .replace('degrees', 'deg')
-        .replace('/', ' ')
-        .replace('-', ' ')
-        .replace('_', ' ')
+        unit_fixed.replace("°", " ")
+        .replace("degrees", "deg")
+        .replace("/", " ")
+        .replace("-", " ")
+        .replace("_", " ")
     )
     unit_tokens = {token for token in unit_normalised.split() if token}
 
-    humidity_tokens = {'%', 'percent', 'humidity', 'humid', 'rh'}
-    if (
-        any(token in channel for token in ('hum', '%'))
-        or '%' in unit
-        or unit_tokens & humidity_tokens
-    ):
-        return 'Humidity'
+    # 1) Unit-based classification takes precedence.
+    humidity_tokens = {"%", "percent", "humidity", "humid", "rh"}
+    if "%" in unit_fixed or unit_tokens & humidity_tokens:
+        return "Humidity"
 
     temperature_tokens = {
-        'temp',
-        'temperature',
-        'degc',
-        'c',
-        'celsius',
-        'degf',
-        'f',
-        'fahrenheit',
-        'degk',
-        'k',
-        'kelvin',
+        "temp",
+        "temperature",
+        "degc",
+        "c",
+        "celsius",
+        "degf",
+        "f",
+        "fahrenheit",
+        "degk",
+        "k",
+        "kelvin",
     }
     if (
-        any(token in channel for token in ('temp', '°c', '°f'))
-        or unit_tokens & temperature_tokens
+        unit_tokens & temperature_tokens
+        or "°c" in unit_fixed
+        or "°f" in unit_fixed
     ):
-        return 'Temperature'
+        return "Temperature"
+
+    # 2) Hint-based classification for ULT / -80 profiles.
+    ult_hints = (
+        "-80",
+        "−80",
+        "minus80",
+        "minus 80",
+        "ultra low",
+        "ultra-low",
+        "ultralow",
+        "ulf",
+        "ult",
+        "ultrafreezer",
+    )
+    sensor_match = re.search(r"sensor\s*0*(\d+)", channel)
+    if sensor_match:
+        sensor_id = sensor_match.group(1)
+    else:
+        sensor_id = None
+
+    if sensor_id == "1" and any(hint in channel for hint in ult_hints):
+        return "Temperature"
+
+    # 3) Fallback based on sensor numbering when available.
+    if sensor_id == "2":
+        return "Temperature"
+    if sensor_id == "1":
+        return "Humidity"
+
+    # 4) Last resort heuristics from channel text.
+    if any(token in channel for token in ("hum", "rh", "%")):
+        return "Humidity"
+    if any(token in channel for token in ("temp", "°c", "°f")):
+        return "Temperature"
 
     return None
 
