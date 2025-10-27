@@ -562,26 +562,27 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     if not frame_infos:
         return []
 
-    parsed_frames: List[pd.DataFrame] = []
+    frames: List[pd.DataFrame] = []
     for frame, context_text in frame_infos:
         if frame is None or frame.empty:
             continue
 
-        normalized = {
-            re.sub(r"\s+", " ", (col or "")).strip().lower(): col
-            for col in frame.columns
+        normalised = {
+            re.sub(r"\s+", " ", (col or "")).strip().lower(): col for col in frame.columns
         }
 
         def _find_column(*aliases: str) -> Optional[str]:
             for alias in aliases:
                 key = re.sub(r"\s+", " ", alias).strip().lower()
-                if key in normalized:
-                    return normalized[key]
+                if key in normalised:
+                    return normalised[key]
             return None
 
         timestamp_col = _find_column("timestamp", "time stamp", "date time")
         data_col = _find_column("data", "value", "reading")
-        unit_col = _find_column("unit", "unit of measure", "units")
+        unit_col = _find_column("unit of measure", "unit", "units")
+        channel_col = _find_column("channel", "sensor", "channel name", "measurement")
+
         if not timestamp_col or not data_col:
             continue
 
@@ -590,15 +591,18 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
             local = local.rename(columns={unit_col: "Unit"})
         else:
             local["Unit"] = ""
+        if channel_col:
+            local = local.rename(columns={channel_col: "Channel"})
+        if "Channel" not in local.columns:
+            local["Channel"] = context_text or ""
 
-        local["Context"] = context_text
-        local["DataColumnLabel"] = data_col
-        parsed_frames.append(local)
+        local["__context__"] = context_text or ""
+        frames.append(local)
 
-    if not parsed_frames:
+    if not frames:
         return []
 
-    df = pd.concat(parsed_frames, ignore_index=True)
+    df = pd.concat(frames, ignore_index=True)
 
     df["DateTime"] = df["Timestamp"].apply(_parse_ts_safe)
     df = df.dropna(subset=["DateTime"])
@@ -612,55 +616,68 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     if df.empty:
         return []
 
-    channel_hints = (
-        df[["Context", "DataColumnLabel"]]
-        .astype(str)
-        .fillna("")
-        .agg(" ".join, axis=1)
-        .str.strip()
-    )
-    unit_series = df["Unit"].astype(str).fillna("")
-    data_text = df["Data"].astype(str).fillna("")
+    lower_text = text.lower()
 
-    def _infer_kind(channel_text: str, unit_text: str, data_str: str) -> str:
-        measurement = _classify_measurement(channel_text, unit_text)
-        if measurement:
-            return measurement
+    def _infer_kind(row: pd.Series) -> str:
+        unit_text = str(row.get("Unit", "")).strip().lower()
+        channel_text = str(row.get("Channel", "")).strip().lower()
+        context_text = str(row.get("__context__", "")).strip().lower()
 
-        lowered = channel_text.lower()
-        if any(term in lowered for term in ("humidity", "relative humidity", "rh")):
+        if "%" in unit_text:
             return "Humidity"
+        if (
+            "°c" in unit_text
+            or unit_text.endswith("c")
+            or "celsius" in unit_text
+            or "degc" in unit_text
+        ):
+            return "Temperature"
 
-        if "%" in unit_text or "%" in data_str:
+        m = re.search(r"sensor\s*0*(\d+)", channel_text)
+        combined_hint = " ".join(filter(None, [channel_text, context_text, lower_text]))
+        if m and m.group(1) == "1":
+            if any(
+                hint in combined_hint
+                for hint in [
+                    "-80",
+                    "−80",
+                    "ultra low",
+                    "ultra-low",
+                    "ultralow",
+                    "ult",
+                    "ulf",
+                ]
+            ):
+                return "Temperature"
+
+        if m:
+            return "Temperature" if m.group(1) == "2" else "Humidity"
+
+        if any(token in channel_text for token in ("hum", "rh", "%")):
             return "Humidity"
+        if any(token in channel_text for token in ("temp", "°c", "°f")):
+            return "Temperature"
 
         return "Temperature"
 
-    df["Kind"] = [
-        _infer_kind(channel, unit, data)
-        for channel, unit, data in zip(channel_hints, unit_series, data_text)
-    ]
+    df["Kind"] = df.apply(_infer_kind, axis=1)
+    df = df.drop(columns=["__context__"], errors="ignore")
 
-    pivot = (
-        df.pivot_table(
-            index="DateTime",
-            columns="Kind",
-            values="Value",
-            aggfunc="mean",
-        )
+    wide = (
+        df.pivot_table(index="DateTime", columns="Kind", values="Value", aggfunc="mean")
         .reset_index()
         .rename_axis(None, axis=1)
         .sort_values("DateTime")
     )
 
     for col in ("Temperature", "Humidity"):
-        if col not in pivot.columns:
-            pivot[col] = pd.NA
+        if col not in wide.columns:
+            wide[col] = pd.NA
 
-    pivot["Date"] = pd.to_datetime(pivot["DateTime"]).dt.date
-    pivot["Time"] = pd.to_datetime(pivot["DateTime"]).dt.strftime("%H:%M")
+    wide["Date"] = pd.to_datetime(wide["DateTime"]).dt.date
+    wide["Time"] = pd.to_datetime(wide["DateTime"]).dt.strftime("%H:%M")
     ordered = ["DateTime", "Temperature", "Humidity", "Date", "Time"]
-    pivot = pivot[[c for c in ordered if c in pivot.columns]]
+    wide = wide[[c for c in ordered if c in wide.columns]]
 
     serial = meta.get("device_id") or meta.get("device_name") or Path(source_name).stem
     range_map: Dict[str, Tuple[float, float]] = {}
@@ -668,7 +685,7 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
 
     return [
         {
-            "df": pivot.reset_index(drop=True),
+            "df": wide.reset_index(drop=True),
             "serial": str(serial),
             "range_map": range_map,
             "option_label": str(serial),
