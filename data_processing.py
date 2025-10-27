@@ -439,23 +439,37 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     if df.empty:
         return []
 
-    df["Channel"] = (
-        df["Channel"]
-        .str.lower()
-        .replace(
-            {
-                "sensor1": "Humidity",
-                "sensor 1": "Humidity",
-                "sensor2": "Temperature",
-                "sensor 2": "Temperature",
-            }
-        )
-    )
-    df["Channel"] = df["Channel"].replace({"humidity": "Humidity", "temperature": "Temperature"})
+    df["Value"] = (
+        df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
+    ).astype(float)
 
-    df["Value"] = pd.to_numeric(
-        df["Data"].str.extract(r"([-+]?\d*\.?\d+)")[0], errors="coerce"
-    )
+    def _kind_row(row: pd.Series) -> str:
+        unit_text = (row.get("Unit") or "").strip().lower()
+        channel_text = str(row.get("Channel", "")).strip().lower()
+
+        if "%" in unit_text:
+            return "Humidity"
+        if "c" in unit_text or "°c" in unit_text:
+            return "Temperature"
+
+        profile_hint = _infer_profile_from_name(
+            source_name,
+            row.get("Serial"),
+            row.get("Space Name"),
+            row.get("Space Type"),
+        )
+        if profile_hint == "Freezer -80" and channel_text in {"sensor1", "sensor 1"}:
+            return "Temperature"
+
+        if channel_text in {"sensor1", "sensor 1"}:
+            return "Humidity"
+        if channel_text in {"sensor2", "sensor 2"}:
+            return "Temperature"
+
+        return "Temperature"
+
+    df["Kind"] = df.apply(_kind_row, axis=1)
+
     df = df.dropna(subset=["Value"])
     if df.empty:
         return []
@@ -468,7 +482,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
         pivot = (
             sub.pivot_table(
                 index="DateTime",
-                columns="Channel",
+                columns="Kind",
                 values="Value",
                 aggfunc="mean",
             )
