@@ -1,5 +1,6 @@
 import io
 import re
+import unicodedata
 from itertools import chain
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
@@ -65,21 +66,32 @@ def _clean_chunk_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _norm(s: str) -> str:
+    """Normalise unicode text by stripping noise and collapsing whitespace."""
+
+    s = unicodedata.normalize("NFKC", (s or ""))
+    s = s.strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
 def _parse_ts_safe(s: str):
-    s = (s or "").strip()
+    text = _norm(str(s))
+    if not text:
+        return pd.NaT
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M:%S",
-        "%m/%d/%Y %H:%M",
         "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
         "%Y-%b-%d %H:%M",
         "%d-%b-%Y %H:%M",
     ):
         try:
-            return pd.to_datetime(s, format=fmt)
+            return pd.to_datetime(text, format=fmt)
         except Exception:
             continue
-    return pd.to_datetime(s, errors="coerce")
+    return pd.to_datetime(text, errors="coerce")
 
 _ZERO_WIDTH_CHARS = ("\ufeff", "\u200b", "\u200c", "\u200d")
 
@@ -375,6 +387,61 @@ def _infer_temperature_range(
 
 
 
+def _alias_col(df: pd.DataFrame, wanted: str, aliases: Iterable[str]) -> Optional[str]:
+    """Return the matching column name for any alias of the desired header."""
+
+    lookup = {
+        re.sub(r"[^a-z0-9]+", "", _norm(str(col)).lower()): col for col in df.columns
+    }
+    for alias in aliases:
+        key = re.sub(r"[^a-z0-9]+", "", _norm(str(alias)).lower())
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
+def _is_temp_unit(unit: str) -> bool:
+    value = _norm(unit).lower()
+    return any(token in value for token in ["°c", " deg c", "degc", " c", "celsius"])
+
+
+def _is_rh_unit(unit: str) -> bool:
+    value = _norm(unit).lower()
+    return "%" in value or "rh" in value or "humidity" in value
+
+
+def _infer_kind_from_unit_and_value(
+    unit: str, channel: str, value: Optional[float], filename_hint: str
+) -> str:
+    """Classify a reading as Temperature or Humidity using unit-first logic."""
+
+    if _is_temp_unit(unit):
+        return "Temperature"
+    if _is_rh_unit(unit):
+        return "Humidity"
+
+    channel_norm = _norm(channel).lower()
+    hint_norm = _norm(filename_hint).lower()
+
+    if value is not None and pd.notna(value):
+        if value <= -40:
+            return "Temperature"
+
+    if any(
+        token in hint_norm
+        for token in ["-80", "−80", "ultra low", "ultra-low", "ultralow", "ult", "ulf"]
+    ):
+        if "sensor1" in channel_norm or "sensor 1" in channel_norm:
+            return "Temperature"
+
+    if any(token in channel_norm for token in ("sensor2", "sensor 2", "temp")):
+        return "Temperature"
+    if any(token in channel_norm for token in ("sensor1", "sensor 1", "hum", "rh", "%")):
+        return "Humidity"
+
+    return "Temperature"
+
+
 def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Dict[str, object]]:
     """Return consolidated Traceable serial data grouped by serial identifier."""
 
@@ -566,36 +633,7 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     for frame, context_text in frame_infos:
         if frame is None or frame.empty:
             continue
-
-        normalised = {
-            re.sub(r"\s+", " ", (col or "")).strip().lower(): col for col in frame.columns
-        }
-
-        def _find_column(*aliases: str) -> Optional[str]:
-            for alias in aliases:
-                key = re.sub(r"\s+", " ", alias).strip().lower()
-                if key in normalised:
-                    return normalised[key]
-            return None
-
-        timestamp_col = _find_column("timestamp", "time stamp", "date time")
-        data_col = _find_column("data", "value", "reading")
-        unit_col = _find_column("unit of measure", "unit", "units")
-        channel_col = _find_column("channel", "sensor", "channel name", "measurement")
-
-        if not timestamp_col or not data_col:
-            continue
-
-        local = frame.rename(columns={timestamp_col: "Timestamp", data_col: "Data"})
-        if unit_col:
-            local = local.rename(columns={unit_col: "Unit"})
-        else:
-            local["Unit"] = ""
-        if channel_col:
-            local = local.rename(columns={channel_col: "Channel"})
-        if "Channel" not in local.columns:
-            local["Channel"] = context_text or ""
-
+        local = frame.copy()
         local["__context__"] = context_text or ""
         frames.append(local)
 
@@ -604,63 +642,98 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
 
     df = pd.concat(frames, ignore_index=True)
 
+    ts_col = _alias_col(
+        df,
+        "Timestamp",
+        ["Timestamp", "Time Stamp", "Date Time", "Datetime", "Date/Time"],
+    )
+    data_col = _alias_col(
+        df,
+        "Data",
+        ["Data", "Value", "Reading", "Measurement"],
+    )
+    unit_col = _alias_col(
+        df,
+        "Unit",
+        [
+            "Unit of Measure",
+            "Unit of Measurement",
+            "Units of Measure",
+            "Units",
+            "Unit (°C)",
+            "Unit",
+            "UOM",
+            "EU",
+            "Engineering Units",
+            "Data Units",
+        ],
+    )
+    chan_col = _alias_col(
+        df,
+        "Channel",
+        ["Channel", "Channel Name", "Sensor", "Sensor Name", "Measurement"],
+    )
+    serial_col = _alias_col(
+        df,
+        "Serial",
+        ["Serial Number", "Device Id", "Device ID", "Device", "Device Serial"],
+    )
+
+    if not ts_col or not data_col:
+        return []
+
+    rename_map = {ts_col: "Timestamp", data_col: "Data"}
+    if unit_col:
+        rename_map[unit_col] = "Unit"
+    if chan_col:
+        rename_map[chan_col] = "Channel"
+    if serial_col:
+        rename_map[serial_col] = "Serial"
+    df = df.rename(columns=rename_map)
+
     df["DateTime"] = df["Timestamp"].apply(_parse_ts_safe)
     df = df.dropna(subset=["DateTime"])
     if df.empty:
         return []
 
-    df["Value"] = pd.to_numeric(
-        df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0], errors="coerce"
+    df["Value"] = (
+        df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0].astype(float)
     )
     df = df.dropna(subset=["Value"])
     if df.empty:
         return []
 
-    lower_text = text.lower()
+    if "Unit" not in df.columns:
+        df["Unit"] = ""
+    df["Unit"] = df["Unit"].fillna("").astype(str)
 
-    def _infer_kind(row: pd.Series) -> str:
-        unit_text = str(row.get("Unit", "")).strip().lower()
-        channel_text = str(row.get("Channel", "")).strip().lower()
-        context_text = str(row.get("__context__", "")).strip().lower()
+    if "Channel" not in df.columns:
+        df["Channel"] = df.get("__context__", "")
+    df["Channel"] = df["Channel"].fillna("").astype(str)
 
-        if "%" in unit_text:
-            return "Humidity"
-        if (
-            "°c" in unit_text
-            or unit_text.endswith("c")
-            or "celsius" in unit_text
-            or "degc" in unit_text
-        ):
-            return "Temperature"
+    filename_hint = " ".join(
+        filter(
+            None,
+            [
+                source_name,
+                meta.get("device_name"),
+                meta.get("device_id"),
+            ],
+        )
+    )
 
-        m = re.search(r"sensor\s*0*(\d+)", channel_text)
-        combined_hint = " ".join(filter(None, [channel_text, context_text, lower_text]))
-        if m and m.group(1) == "1":
-            if any(
-                hint in combined_hint
-                for hint in [
-                    "-80",
-                    "−80",
-                    "ultra low",
-                    "ultra-low",
-                    "ultralow",
-                    "ult",
-                    "ulf",
-                ]
-            ):
-                return "Temperature"
+    df["Kind"] = df.apply(
+        lambda row: _infer_kind_from_unit_and_value(
+            row.get("Unit", ""),
+            " ".join(
+                filter(None, [row.get("Channel", ""), row.get("__context__", "")])
+            ),
+            row.get("Value"),
+            filename_hint,
+        ),
+        axis=1,
+    )
 
-        if m:
-            return "Temperature" if m.group(1) == "2" else "Humidity"
-
-        if any(token in channel_text for token in ("hum", "rh", "%")):
-            return "Humidity"
-        if any(token in channel_text for token in ("temp", "°c", "°f")):
-            return "Temperature"
-
-        return "Temperature"
-
-    df["Kind"] = df.apply(_infer_kind, axis=1)
     df = df.drop(columns=["__context__"], errors="ignore")
 
     wide = (
@@ -669,6 +742,9 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         .rename_axis(None, axis=1)
         .sort_values("DateTime")
     )
+
+    if wide.empty:
+        return []
 
     for col in ("Temperature", "Humidity"):
         if col not in wide.columns:
@@ -679,7 +755,18 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     ordered = ["DateTime", "Temperature", "Humidity", "Date", "Time"]
     wide = wide[[c for c in ordered if c in wide.columns]]
 
-    serial = meta.get("device_id") or meta.get("device_name") or Path(source_name).stem
+    serial: Optional[str] = None
+    if "Serial" in df.columns:
+        serial_series = df["Serial"].astype(str).str.strip()
+        serial_series = serial_series[serial_series != ""]
+        if not serial_series.empty:
+            try:
+                serial = serial_series.mode().iloc[0]
+            except Exception:
+                serial = serial_series.iloc[0]
+
+    serial = serial or meta.get("device_id") or meta.get("device_name") or Path(source_name).stem
+
     range_map: Dict[str, Tuple[float, float]] = {}
     _apply_inferred_ranges(range_map, source_name, serial, meta.get("device_name"))
 
