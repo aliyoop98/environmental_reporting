@@ -1383,29 +1383,6 @@ for tab, name in zip(tabs, serial_keys):
                     if stat_lines:
                         st.caption(" | ".join(stat_lines))
                     has_content = True
-            # Combined exports
-            st.markdown("### Export")
-            cx, cy = st.columns(2)
-            with cx:
-                if not combined_events.empty:
-                    st.download_button(
-                        "⬇️ Combined OOR events (CSV)",
-                        combined_events.to_csv(index=False),
-                        file_name=f"{name}_oor_events.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.caption("No OOR events to export for this serial.")
-            with cy:
-                audit_text = _build_audit_text(
-                    current_result, total_minutes, total_events, incident_channels
-                )
-                st.download_button(
-                    "⬇️ Audit summary (TXT)",
-                    audit_text.encode("utf-8"),
-                    file_name=f"{name}_audit_summary.txt",
-                    mime="text/plain",
-                )
                 if ch_result.get("oor_table") is not None:
                     st.markdown(f"### {ch} OOR Events")
                     ev_df = ch_result["oor_table"]
@@ -1467,7 +1444,9 @@ for tab, name in zip(tabs, serial_keys):
                             _update_row_state(includes)
 
                         included_indices = [i for i, inc in enumerate(includes) if inc]
-                        included_df = ev_df.iloc[included_indices] if included_indices else ev_df.iloc[[]]
+                        included_df = (
+                            ev_df.iloc[included_indices] if included_indices else ev_df.iloc[[]]
+                        )
                         total_included = (
                             float(included_df["Duration(min)"].sum())
                             if not included_df.empty
@@ -1520,6 +1499,29 @@ for tab, name in zip(tabs, serial_keys):
                     if ch_result.get("oor_reason"):
                         st.caption(ch_result["oor_reason"])
                     has_content = True
+            # Combined exports
+            st.markdown("### Export")
+            cx, cy = st.columns(2)
+            with cx:
+                if not combined_events.empty:
+                    st.download_button(
+                        "⬇️ Combined OOR events (CSV)",
+                        combined_events.to_csv(index=False),
+                        file_name=f"{name}_oor_events.csv",
+                        mime="text/csv",
+                    )
+                else:
+                    st.caption("No OOR events to export for this serial.")
+            with cy:
+                audit_text = _build_audit_text(
+                    current_result, total_minutes, total_events, incident_channels
+                )
+                st.download_button(
+                    "⬇️ Audit summary (TXT)",
+                    audit_text.encode("utf-8"),
+                    file_name=f"{name}_audit_summary.txt",
+                    mime="text/plain",
+                )
 
             if has_content and st.button("Save results for this session", key=f"save_{name}"):
                 st.session_state["saved_results"].append(copy.deepcopy(current_result))
