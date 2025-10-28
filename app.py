@@ -116,6 +116,18 @@ def _merge_serial_info(
     return result
 
 
+def _is_oor_strict(value: float, lo: Optional[float], hi: Optional[float]) -> bool:
+    """Return True when the value is strictly outside the provided bounds."""
+
+    if pd.isna(value):
+        return False
+    if lo is not None and value < lo:
+        return True
+    if hi is not None and value > hi:
+        return True
+    return False
+
+
 def _state_key(prefix: str, identifier: str) -> str:
     digest = hashlib.sha1(identifier.encode('utf-8')).hexdigest()[:10]
     return f"{prefix}_{digest}"
@@ -947,8 +959,11 @@ def _build_outputs(
         }
 
         ch_lo, ch_hi = channel_ranges.get(ch, (None, None))
-        if ch_lo is not None:
-            base = sel_all_raw[["DateTime", ch]].dropna().copy()
+        if ch_lo is not None or ch_hi is not None:
+            base = sel_all_raw[["DateTime", ch]].copy()
+            base = base.dropna(subset=["DateTime"])  # drop rows without timestamps
+            base[ch] = pd.to_numeric(base[ch], errors="coerce")
+            base = base.dropna(subset=[ch])
             if base.empty:
                 channel_info['oor_table'] = pd.DataFrame(
                     columns=['Start', 'End', 'Duration(min)', 'Source']
@@ -966,37 +981,45 @@ def _build_outputs(
                 base["Source"] = primary_legend
 
             df_ch = base.sort_values("DateTime").copy()
-            upper_mask = (df_ch[ch] > ch_hi) if ch_hi is not None else False
-            df_ch['OOR'] = (df_ch[ch] < ch_lo) | upper_mask
-            if df_ch.empty:
+            df_ch['OOR'] = df_ch[ch].apply(lambda value: _is_oor_strict(value, ch_lo, ch_hi))
+
+            if not df_ch['OOR'].any():
                 channel_info['oor_table'] = pd.DataFrame(
                     columns=['Start', 'End', 'Duration(min)', 'Source']
                 )
-                channel_info['oor_reason'] = 'No raw data available to evaluate OOR events.'
+                channel_info['total_minutes'] = 0.0
+                channel_info['incident'] = False
                 result["channel_results"][ch] = channel_info
                 continue
-            df_ch['next_dt'] = df_ch['DateTime'].shift(-1)
-            med_step = (
-                df_ch['DateTime'].diff().dt.total_seconds().div(60).median()
-            )
-            df_ch['dur_min'] = (
-                (df_ch['next_dt'] - df_ch['DateTime']).dt.total_seconds().div(60)
-            ).fillna(med_step).clip(lower=0)
-            df_ch['blk'] = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
+
+            groups = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
             events = []
-            for _, grp in df_ch[df_ch['OOR']].groupby('blk'):
+            for _, grp in df_ch[df_ch['OOR']].groupby(groups[df_ch['OOR']]):
                 start = grp['DateTime'].iloc[0]
-                end = grp['next_dt'].iloc[-1]
-                if pd.isna(end) and pd.notna(med_step):
-                    end = grp['DateTime'].iloc[-1] + pd.to_timedelta(med_step, unit='m')
-                duration = float(grp['dur_min'].sum())
+                end = grp['DateTime'].iloc[-1]
+                if pd.notna(start) and pd.notna(end):
+                    duration_td = end - start
+                    duration = max(duration_td.total_seconds() / 60.0, 0.0)
+                else:
+                    duration = 0.0
                 mode_source = grp['Source'].mode(dropna=True)
                 if not mode_source.empty:
                     source_label = mode_source.iloc[0]
                 else:
                     non_na_sources = grp['Source'].dropna()
-                    source_label = non_na_sources.iloc[0] if not non_na_sources.empty else primary_legend
-                events.append({'Start': start, 'End': end, 'Duration(min)': duration, 'Source': source_label})
+                    source_label = (
+                        non_na_sources.iloc[0]
+                        if not non_na_sources.empty
+                        else primary_legend
+                    )
+                events.append(
+                    {
+                        'Start': start,
+                        'End': end,
+                        'Duration(min)': float(duration),
+                        'Source': source_label,
+                    }
+                )
             ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)', 'Source'])
             channel_info['oor_table'] = ev_df
             total = float(ev_df['Duration(min)'].sum()) if not ev_df.empty else 0.0
