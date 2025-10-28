@@ -501,8 +501,10 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     if df.empty:
         return []
 
-    df["DateTime"] = df["Timestamp"].apply(_parse_ts_safe)
-    df = df.dropna(subset=["DateTime"])
+    df["Timestamp"] = df["Timestamp"].apply(_parse_ts_safe)
+    df = df.dropna(subset=["Timestamp"])
+    df = df.sort_values("Timestamp")
+    df["DateTime"] = df["Timestamp"]
     if df.empty:
         return []
 
@@ -564,6 +566,9 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             .rename_axis(None, axis=1)
             .sort_values("DateTime")
         )
+        # Keep the raw timestamp resolution intact for charting; aggregation is
+        # handled later when producing summary reports rather than at ingest
+        # time.
         if pivot.empty:
             continue
 
@@ -691,8 +696,10 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         rename_map[serial_col] = "Serial"
     df = df.rename(columns=rename_map)
 
-    df["DateTime"] = df["Timestamp"].apply(_parse_ts_safe)
-    df = df.dropna(subset=["DateTime"])
+    df["Timestamp"] = df["Timestamp"].apply(_parse_ts_safe)
+    df = df.dropna(subset=["Timestamp"])
+    df = df.sort_values("Timestamp")
+    df["DateTime"] = df["Timestamp"]
     if df.empty:
         return []
 
@@ -1109,8 +1116,10 @@ def _process_new_schema_df(
     df_new["Channel"] = df_new["Channel"].str.strip()
     df_new["Unit of Measure"] = df_new["Unit of Measure"].fillna("").str.strip()
 
-    df_new["DateTime"] = df_new["Timestamp"].apply(_parse_ts)
-    df_new = df_new.dropna(subset=["DateTime"])
+    df_new["Timestamp"] = df_new["Timestamp"].apply(_parse_ts)
+    df_new = df_new.dropna(subset=["Timestamp"])
+    df_new = df_new.sort_values("Timestamp")
+    df_new["DateTime"] = df_new["Timestamp"]
     df_new = df_new[df_new["Serial Number"].astype(str).str.strip() != ""]
 
     cleaned_values = (
@@ -1214,6 +1223,8 @@ def _process_new_schema_df(
         if pivot.empty:
             continue
         pivot = pivot.rename_axis(None, axis=1).sort_index()
+        # Do not resample or collapse timestamps here; downstream consumers rely
+        # on the native cadence for visualisations and alert calculations.
         expected_channels = {
             ch
             for ch in sdf['Channel'].dropna().unique()
