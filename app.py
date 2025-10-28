@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Tuple
+from textwrap import dedent
 
 import streamlit as st
 import pandas as pd
@@ -45,22 +46,110 @@ st.markdown(
     """
     <style>
         .stApp { background-color: white; }
-        [data-testid="stSidebar"] { background-color: light blue; }
+        [data-testid="stSidebar"] { background-color: white; }
+        .kpi { font-size: 14px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# ---------- UX helpers ----------
+def _show_howto_once() -> None:
+    """Show a short guided tip once per session + persistent how-to details."""
+
+    seen = st.session_state.get("seen_tour", False)
+    if not seen:
+        st.info(
+            "👋 Quick tour: Upload serial CSVs → pick Year/Month → click **Generate** on a serial tab. "
+            "Exact limits are in-range. Single-sample OOR = 1 minute. OOR ends at the first in-range sample."
+        )
+        st.session_state["seen_tour"] = True
+    with st.expander("How to use this page", expanded=not seen):
+        st.markdown(
+            dedent(
+                """
+                1) **Upload** consolidated or single-serial Traceable CSVs. Optional: legacy probe CSVs.
+                2) **Pick** Year & Month detected from the data (left sidebar).
+                3) Open a serial tab and press **Generate** to render charts and OOR tables.
+                4) Use **Data windows** to bound mid-month hardware swaps (old probe → new serial).
+                5) Export the **combined OOR CSV** and a **TXT audit** for your report.
+                """
+            )
+        )
+
+
+def _summarize_current_result(result: Dict) -> Tuple[float, int, int, pd.DataFrame]:
+    """
+    Returns (total_minutes, total_events, incident_channels, combined_events_df).
+    combined_events_df columns: Serial, Channel, Start, End, Duration(min)
+    """
+
+    total_minutes = 0.0
+    total_events = 0
+    incident_channels = 0
+    rows: List[pd.DataFrame] = []
+    serial_name = result.get("name", "")
+    channel_results = result.get("channel_results") or {}
+    for ch in result.get("channels", []):
+        ch_res = channel_results.get(ch) or {}
+        ev = ch_res.get("oor_table")
+        if isinstance(ev, pd.DataFrame) and not ev.empty:
+            df = ev.copy()
+            df.insert(0, "Channel", ch)
+            df.insert(0, "Serial", serial_name)
+            rows.append(df)
+            total_events += len(df)
+            total_minutes += float(ch_res.get("total_minutes", df["Duration(min)"].sum()))
+        if ch_res.get("incident"):
+            incident_channels += 1
+    combo = (
+        pd.concat(rows, ignore_index=True)
+        if rows
+        else pd.DataFrame(columns=["Serial", "Channel", "Start", "End", "Duration(min)"])
+    )
+    return total_minutes, total_events, incident_channels, combo
+
+
+def _build_audit_text(
+    result: Dict, total_minutes: float, total_events: int, incidents: int
+) -> str:
+    title = str(result.get("chart_title") or result.get("name") or "Serial")
+    year = result.get("year")
+    month = result.get("month")
+    period = f"{calendar.month_name[month]} {year}" if month and year else "Selected period"
+    materials = result.get("materials", "")
+    probe_id = result.get("probe_id", "")
+    equip_id = result.get("equip_id", "")
+    lines = [
+        f"Audit Summary – {title}",
+        f"Period: {period}",
+        f"Materials: {materials} | Probe: {probe_id} | Equipment: {equip_id}",
+        f"Total OOR minutes: {total_minutes:.1f}",
+        f"Total OOR events: {total_events}",
+        f"Channels with incidents (≥60 min): {incidents}",
+        "",
+        "Rules:",
+        "- Exact thresholds are in-range.",
+        "- Single-sample OOR counts as 1 minute.",
+        "- OOR ends at the first in-range sample after a run.",
+    ]
+    return "\n".join(lines)
+
+
+# ---------- end UX helpers ----------
+
 st.sidebar.header("🌦️ Data Upload & Configuration")
 serial_files = st.sidebar.file_uploader(
     "Upload Consolidated Serial CSV files",
     accept_multiple_files=True,
-    key="serial_uploader"
+    key="serial_uploader",
+    help="Traceable Live consolidated (multi-serial) or single-serial CSVs.",
 )
 probe_files = st.sidebar.file_uploader(
     "Upload Probe CSV files (optional)",
     accept_multiple_files=True,
-    key="probe_uploader"
+    key="probe_uploader",
+    help="Legacy probe CSVs for months with mid-month hardware swaps.",
 )
 
 
@@ -574,8 +663,13 @@ years, months = _collect_years_months(primary_dfs)
 if not years or not months:
     st.sidebar.warning("No valid timestamp data found in the uploaded serial files.")
     st.stop()
-year = st.sidebar.selectbox("Year", years)
-month = st.sidebar.selectbox("Month", months, format_func=lambda m: calendar.month_name[m])
+year = st.sidebar.selectbox("Year", years, help="Detected from uploaded files.")
+month = st.sidebar.selectbox(
+    "Month",
+    months,
+    format_func=lambda m: calendar.month_name[m],
+    help="Pick the reporting month to analyze.",
+)
 
 for name in serial_keys:
     meta = serial_metadata.get(name, {})
@@ -997,6 +1091,7 @@ tab_titles = [serial_metadata[name].get('tab_label') or str(name) for name in se
 tabs = st.tabs(tab_titles)
 for tab, name in zip(tabs, serial_keys):
     with tab:
+        _show_howto_once()
         df = primary_dfs[name]
         meta = serial_metadata.get(name, {})
         st.subheader(meta.get('tab_label') or str(name))
@@ -1241,6 +1336,22 @@ for tab, name in zip(tabs, serial_keys):
                 for msg in current_result["warnings"]:
                     st.warning(msg)
 
+            # KPI header
+            (
+                total_minutes,
+                total_events,
+                incident_channels,
+                combined_events,
+            ) = _summarize_current_result(current_result)
+            kc1, kc2, kc3, kc4 = st.columns(4)
+            kc1.metric("Total OOR minutes", f"{total_minutes:.0f}")
+            kc2.metric("OOR events", f"{total_events}")
+            kc3.metric("Incident channels (≥60m)", f"{incident_channels}")
+            parsed_files = (len(serial_files) if serial_files else 0) + (
+                len(probe_files) if probe_files else 0
+            )
+            kc4.metric("Files parsed", f"{parsed_files}")
+
             has_content = False
             for ch in current_result["channels"]:
                 ch_result = current_result["channel_results"].get(ch)
@@ -1272,6 +1383,29 @@ for tab, name in zip(tabs, serial_keys):
                     if stat_lines:
                         st.caption(" | ".join(stat_lines))
                     has_content = True
+            # Combined exports
+            st.markdown("### Export")
+            cx, cy = st.columns(2)
+            with cx:
+                if not combined_events.empty:
+                    st.download_button(
+                        "⬇️ Combined OOR events (CSV)",
+                        combined_events.to_csv(index=False),
+                        file_name=f"{name}_oor_events.csv",
+                        mime="text/csv",
+                    )
+                else:
+                    st.caption("No OOR events to export for this serial.")
+            with cy:
+                audit_text = _build_audit_text(
+                    current_result, total_minutes, total_events, incident_channels
+                )
+                st.download_button(
+                    "⬇️ Audit summary (TXT)",
+                    audit_text.encode("utf-8"),
+                    file_name=f"{name}_audit_summary.txt",
+                    mime="text/plain",
+                )
                 if ch_result.get("oor_table") is not None:
                     st.markdown(f"### {ch} OOR Events")
                     ev_df = ch_result["oor_table"]
