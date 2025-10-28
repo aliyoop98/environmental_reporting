@@ -42,17 +42,17 @@ def test_compute_oor_events_duration_and_single_sample_minimum() -> None:
     assert len(events) == 2
     first, second = events.iloc[0], events.iloc[1]
 
-    # First run: three unique timestamps -> gaps (5 + 10) minutes = 15 total.
-    assert first["Duration(min)"] == 15.0
+    # First run extends until first in-range sample (00:25) -> 20 minutes total.
+    assert first["Duration(min)"] == 20.0
     assert first["Start"] == pd.Timestamp("2024-01-01 00:05")
-    assert first["End"] == pd.Timestamp("2024-01-01 00:20")
+    assert first["End"] == pd.Timestamp("2024-01-01 00:25")
     assert first["Source"] == "primary"
 
-    # Second run: single sample should be rounded up to policy minimum.
-    assert second["Duration(min)"] == OOR_MIN_SINGLE_SAMPLE_MINUTES
+    # Second run: single sample counts until first in-range sample at 01:05 -> 5 minutes.
+    assert second["Duration(min)"] == 5.0
     assert second["Start"] == pd.Timestamp("2024-01-01 01:00")
-    assert second["End"] == pd.Timestamp("2024-01-01 01:00")
+    assert second["End"] == pd.Timestamp("2024-01-01 01:05")
     assert second["Source"] == "primary"
 
     # Total duration respects sum of individual runs.
-    assert events["Duration(min)"].sum() == 15.0 + OOR_MIN_SINGLE_SAMPLE_MINUTES
+    assert events["Duration(min)"].sum() == 25.0
