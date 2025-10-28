@@ -234,6 +234,49 @@ def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _finalize_timeseries(
+    df: pd.DataFrame, timestamp_col: Optional[str] = None
+) -> pd.DataFrame:
+    """Return a sorted dataframe with consistent DateTime/Date columns."""
+
+    if df is None or df.empty:
+        return df
+
+    result = df.copy()
+
+    ts_series: Optional[pd.Series]
+    ts_series = None
+
+    if timestamp_col and timestamp_col in result.columns:
+        ts_series = pd.to_datetime(result[timestamp_col], errors="coerce")
+    elif "DateTime" in result.columns:
+        ts_series = pd.to_datetime(result["DateTime"], errors="coerce")
+    elif "Timestamp" in result.columns:
+        ts_series = pd.to_datetime(result["Timestamp"], errors="coerce")
+    else:
+        date_series = result.get("Date")
+        if date_series is not None:
+            parsed_dates = pd.to_datetime(date_series, errors="coerce")
+            time_series = result.get("Time")
+            if time_series is not None:
+                combined = (
+                    parsed_dates.dt.strftime("%Y-%m-%d").fillna("")
+                    + " "
+                    + time_series.astype("string").fillna("")
+                ).str.strip()
+                ts_series = pd.to_datetime(combined, errors="coerce")
+            else:
+                ts_series = parsed_dates
+
+    if ts_series is None:
+        ts_series = pd.to_datetime(result.get("DateTime"), errors="coerce")
+
+    result["DateTime"] = ts_series
+    result["Date"] = pd.to_datetime(result["DateTime"], errors="coerce").dt.date
+    result = result.sort_values("DateTime").reset_index(drop=True)
+    return result
+
+
 def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -576,9 +619,10 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             if col not in pivot.columns:
                 pivot[col] = pd.NA
 
-        pivot["Date"] = pd.to_datetime(pivot["DateTime"]).dt.date
-        pivot["Time"] = pd.to_datetime(pivot["DateTime"]).dt.strftime("%H:%M")
-
+        ordered = ["DateTime", "Temperature", "Humidity"]
+        pivot = pivot[[c for c in ordered if c in pivot.columns]]
+        pivot = _finalize_timeseries(pivot)
+        pivot["Time"] = pivot["DateTime"].dt.strftime("%H:%M")
         ordered = ["DateTime", "Temperature", "Humidity", "Date", "Time"]
         pivot = pivot[[c for c in ordered if c in pivot.columns]]
 
@@ -613,7 +657,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
 
         items.append(
             {
-                "df": pivot.reset_index(drop=True),
+                "df": pivot,
                 "serial": str(serial),
                 "range_map": range_map,
                 "option_label": option_label,
@@ -757,8 +801,10 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         if col not in wide.columns:
             wide[col] = pd.NA
 
-    wide["Date"] = pd.to_datetime(wide["DateTime"]).dt.date
-    wide["Time"] = pd.to_datetime(wide["DateTime"]).dt.strftime("%H:%M")
+    ordered = ["DateTime", "Temperature", "Humidity"]
+    wide = wide[[c for c in ordered if c in wide.columns]]
+    wide = _finalize_timeseries(wide)
+    wide["Time"] = wide["DateTime"].dt.strftime("%H:%M")
     ordered = ["DateTime", "Temperature", "Humidity", "Date", "Time"]
     wide = wide[[c for c in ordered if c in wide.columns]]
 
@@ -779,7 +825,7 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
 
     return [
         {
-            "df": wide.reset_index(drop=True),
+            "df": wide,
             "serial": str(serial),
             "range_map": range_map,
             "option_label": str(serial),
@@ -1375,7 +1421,10 @@ def _parse_probe_files(files):
         )
         for c in df.columns.difference(['Date', 'Time', 'DateTime']):
             df[c] = pd.to_numeric(df[c].astype(str).str.replace('+',''), errors='coerce')
-        dfs[name] = df.reset_index(drop=True)
+        df = _finalize_timeseries(df, timestamp_col="DateTime")
+        if "Time" in df.columns:
+            df["Time"] = df["DateTime"].dt.strftime('%H:%M')
+        dfs[name] = df
     return dfs, ranges
 
 
