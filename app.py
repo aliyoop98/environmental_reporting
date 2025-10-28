@@ -32,6 +32,13 @@ except ModuleNotFoundError:  # pragma: no cover - import fallback
         parse_serial_csv,
     )
 
+try:
+    from oor import _compute_oor_events
+except ModuleNotFoundError:  # pragma: no cover - import fallback
+    if str(CURRENT_DIR) not in sys.path:
+        sys.path.insert(0, str(CURRENT_DIR))
+    from .oor import _compute_oor_events  # type: ignore[no-redef]
+
 
 st.set_page_config(page_title="Environmental Reporting", layout="wide", page_icon="⛅")
 st.markdown(
@@ -114,20 +121,6 @@ def _merge_serial_info(
         result['source_name'] = ", ".join(dict.fromkeys(sources))
 
     return result
-
-
-def _is_oor_strict(value: float, lo: Optional[float], hi: Optional[float]) -> bool:
-    """Return True when the value is strictly outside the provided bounds."""
-
-    if pd.isna(value):
-        return False
-    if lo is not None and value < lo:
-        return True
-    if hi is not None and value > hi:
-        return True
-    return False
-
-
 def _state_key(prefix: str, identifier: str) -> str:
     digest = hashlib.sha1(identifier.encode('utf-8')).hexdigest()[:10]
     return f"{prefix}_{digest}"
@@ -980,52 +973,17 @@ def _build_outputs(
             else:
                 base["Source"] = primary_legend
 
-            df_ch = base.sort_values("DateTime").copy()
-            df_ch['OOR'] = df_ch[ch].apply(lambda value: _is_oor_strict(value, ch_lo, ch_hi))
+            base["Source"] = base["Source"].fillna(primary_legend)
 
-            if not df_ch['OOR'].any():
-                channel_info['oor_table'] = pd.DataFrame(
-                    columns=['Start', 'End', 'Duration(min)', 'Source']
-                )
-                channel_info['total_minutes'] = 0.0
-                channel_info['incident'] = False
-                result["channel_results"][ch] = channel_info
-                continue
-
-            groups = (df_ch['OOR'] != df_ch['OOR'].shift(fill_value=False)).cumsum()
-            events = []
-            for _, grp in df_ch[df_ch['OOR']].groupby(groups[df_ch['OOR']]):
-                start = grp['DateTime'].iloc[0]
-                end = grp['DateTime'].iloc[-1]
-                if pd.notna(start) and pd.notna(end):
-                    duration_td = end - start
-                    duration = max(duration_td.total_seconds() / 60.0, 0.0)
-                else:
-                    duration = 0.0
-                mode_source = grp['Source'].mode(dropna=True)
-                if not mode_source.empty:
-                    source_label = mode_source.iloc[0]
-                else:
-                    non_na_sources = grp['Source'].dropna()
-                    source_label = (
-                        non_na_sources.iloc[0]
-                        if not non_na_sources.empty
-                        else primary_legend
-                    )
-                events.append(
-                    {
-                        'Start': start,
-                        'End': end,
-                        'Duration(min)': float(duration),
-                        'Source': source_label,
-                    }
-                )
-            ev_df = pd.DataFrame(events, columns=['Start', 'End', 'Duration(min)', 'Source'])
+            ev_df = _compute_oor_events(base, ch, ch_lo, ch_hi, primary_legend)
             channel_info['oor_table'] = ev_df
             total = float(ev_df['Duration(min)'].sum()) if not ev_df.empty else 0.0
             incident = bool(total >= 60 or (not ev_df.empty and ev_df['Duration(min)'].max() > 60))
             channel_info['total_minutes'] = total
             channel_info['incident'] = incident
+            if ev_df.empty:
+                result["channel_results"][ch] = channel_info
+                continue
         else:
             channel_info['oor_table'] = pd.DataFrame(columns=['Start', 'End', 'Duration(min)', 'Source'])
             channel_info['oor_reason'] = 'No limits available for this channel, so OOR events cannot be calculated.'
