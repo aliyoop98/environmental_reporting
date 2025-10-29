@@ -1,4 +1,5 @@
 streamlit
 pandas
 altair
+vl-convert-python
 numpy
