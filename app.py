@@ -1,5 +1,8 @@
 import copy
 import hashlib
+import io
+import re
+import zipfile
 from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +13,12 @@ import pandas as pd
 import calendar
 import altair as alt
 from datetime import datetime, timedelta
+
+try:
+    # For pixel-perfect PNG export of Altair/Vega-Lite specs
+    import vl_convert as vlc
+except Exception:  # pragma: no cover - optional dependency at runtime
+    vlc = None
 
 # Ensure imports work whether the app is executed as a module (e.g. via
 # ``python -m environmental_reporting.app``) or as a script where the repository
@@ -48,6 +57,23 @@ st.markdown(
         .stApp { background-color: white; }
         [data-testid="stSidebar"] { background-color: white; }
         .kpi { font-size: 14px; }
+        /* ---------- Subtle animations (Fun Mode) ---------- */
+        .fade-in { animation: fadeIn 480ms ease-out both; }
+        .fade-in-slow { animation: fadeIn 700ms ease-out both; }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        .range-badge {
+          display:inline-block; padding: 2px 8px; border-radius: 999px;
+          background: linear-gradient(90deg, #eef6ff, #f5fbff);
+          border: 1px solid #e6eef8; font-size: 12px;
+        }
+        .range-badge.pulse { animation: pulse 2s ease-in-out infinite; }
+        @keyframes pulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(30,144,255,0.0); }
+          50%     { box-shadow: 0 0 0 6px rgba(30,144,255,0.06); }
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -61,18 +87,18 @@ def _show_howto_once() -> None:
     if not seen:
         st.info(
             "👋 Quick tour: Upload serial CSVs → pick Year/Month → click **Generate** on a serial tab. "
-            "Exact limits are in-range. Single-sample OOR = 1 minute. OOR ends at the first in-range sample."
+            "Exact limits are in-range; single-sample OOR = 1 minute; OOR ends at the first in-range sample."
         )
         st.session_state["seen_tour"] = True
     with st.expander("How to use this page", expanded=not seen):
         st.markdown(
             dedent(
                 """
-                1) **Upload** consolidated or single-serial Traceable CSVs. Optional: legacy probe CSVs.
-                2) **Pick** Year & Month detected from the data (left sidebar).
-                3) Open a serial tab and press **Generate** to render charts and OOR tables.
-                4) Use **Data windows** to bound mid-month hardware swaps (old probe → new serial).
-                5) Export the **combined OOR CSV** and a **TXT audit** for your report.
+                1) **Upload** Traceable CSVs (single- or multi-serial). Optional: legacy probe CSVs.
+                2) **Pick** Year & Month.
+                3) Open a serial tab → **Generate** charts + OOR tables.
+                4) Use **Date windows** for mid-month hardware swaps.
+                5) **Export** bundle: OOR CSVs, audit TXT, and fixed-size PNG charts.
                 """
             )
         )
@@ -88,7 +114,7 @@ def _summarize_current_result(result: Dict) -> Tuple[float, int, int, pd.DataFra
     total_events = 0
     incident_channels = 0
     rows: List[pd.DataFrame] = []
-    serial_name = result.get("name", "")
+    serial_name = str(result.get("name", ""))
     channel_results = result.get("channel_results") or {}
     for ch in result.get("channels", []):
         ch_res = channel_results.get(ch) or {}
@@ -99,7 +125,9 @@ def _summarize_current_result(result: Dict) -> Tuple[float, int, int, pd.DataFra
             df.insert(0, "Serial", serial_name)
             rows.append(df)
             total_events += len(df)
-            total_minutes += float(ch_res.get("total_minutes", df["Duration(min)"].sum()))
+            total_minutes += float(
+                ch_res.get("total_minutes", df["Duration(min)"].sum())
+            )
         if ch_res.get("incident"):
             incident_channels += 1
     combo = (
@@ -136,9 +164,69 @@ def _build_audit_text(
     return "\n".join(lines)
 
 
+def _sanitize(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "chart"
+
+
+def _export_chart_png(
+    chart: alt.Chart, width: int = 1280, height: int = 480, scale: int = 2
+) -> Optional[bytes]:
+    """Export an Altair chart as a crisp PNG at a fixed size."""
+
+    if vlc is None:
+        return None
+    export_chart = chart.properties(width=width, height=height)
+    spec = export_chart.to_dict()
+    return vlc.vegalite_to_png(spec, scale=scale)
+
+
+def _zip_bundle(
+    name: str,
+    combined_events: pd.DataFrame,
+    audit_text: str,
+    channel_results: Dict[str, Dict],
+) -> bytes:
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            f"{_sanitize(name)}_OOR_combined.csv",
+            combined_events.to_csv(index=False),
+        )
+        zf.writestr(f"{_sanitize(name)}_audit_summary.txt", audit_text)
+        for ch, ch_res in channel_results.items():
+            ev = ch_res.get("oor_table")
+            if isinstance(ev, pd.DataFrame):
+                zf.writestr(
+                    f"{_sanitize(name)}_{_sanitize(ch)}_OOR.csv",
+                    ev.to_csv(index=False),
+                )
+            chart = ch_res.get("chart")
+            if chart is not None:
+                png = _export_chart_png(chart)
+                if png:
+                    zf.writestr(f"{_sanitize(name)}_{_sanitize(ch)}.png", png)
+    mem.seek(0)
+    return mem.getvalue()
+
+
 # ---------- end UX helpers ----------
 
 st.sidebar.header("🌦️ Data Upload & Configuration")
+fun_mode = st.sidebar.toggle(
+    "✨ Fun Mode",
+    value=False,
+    help="Adds gentle animations and balloons on all-clear. Cosmetic only.",
+)
+always_show_oor = st.sidebar.toggle(
+    "Show OOR panels even when empty",
+    value=False,
+    help="Force OOR tables to display even with no excursions.",
+)
+if st.sidebar.button("↺ Reset session", help="Clear cached widget state and rerun."):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.experimental_rerun()
+
 serial_files = st.sidebar.file_uploader(
     "Upload Consolidated Serial CSV files",
     accept_multiple_files=True,
@@ -151,6 +239,63 @@ probe_files = st.sidebar.file_uploader(
     key="probe_uploader",
     help="Legacy probe CSVs for months with mid-month hardware swaps.",
 )
+
+
+def _build_mock_csvs() -> Dict[str, bytes]:
+    def rows_to_csv(rows: List[List[str]]) -> bytes:
+        header = "Timestamp,Serial Number,Channel,Data,Unit of Measure\n"
+        body = "\n".join([",".join(map(str, r)) for r in rows])
+        return (header + body + "\n").encode("utf-8")
+
+    def t(day: int, hh: int, mm: int) -> str:
+        return f"2025-Sep-{day:02d} {hh:02d}:{mm:02d}"
+
+    room = [[t(1, 12, m), "300100003", "sensor1", "65.0", "%"] for m in (0, 5, 10, 15, 20, 25)]
+    room.append([t(1, 12, 30), "300100003", "sensor1", "50.0", "%"])
+
+    fridge = [
+        [t(2, 14, 10), "FR0007", "sensor2", "12.0", "C"],
+        [t(2, 14, 15), "FR0007", "sensor2", "12.0", "C"],
+        [t(2, 14, 20), "FR0007", "sensor2", "12.0", "C"],
+        [t(2, 14, 25), "FR0007", "sensor2", "12.0", "C"],
+        [t(2, 14, 30), "FR0007", "sensor2", "5.0", "C"],
+        [t(2, 14, 40), "FR0007", "sensor2", "0.0", "C"],
+        [t(2, 14, 45), "FR0007", "sensor2", "0.0", "C"],
+        [t(2, 14, 50), "FR0007", "sensor2", "0.0", "C"],
+        [t(2, 14, 55), "FR0007", "sensor2", "4.0", "C"],
+    ]
+
+    freezer = [[t(3, 9, m), "FZ0006", "sensor2", "-5.0", "C"] for m in (0, 5, 10, 15, 20, 25)]
+    freezer.append([t(3, 9, 30), "FZ0006", "sensor2", "-20.0", "C"])
+
+    ult = [[t(4, 10, m), "ULT123456", "sensor2", "-65.0", "C"] for m in (0, 5, 10, 15)]
+    ult.append([t(4, 10, 20), "ULT123456", "sensor2", "-75.0", "C"])
+
+    return {
+        "mock_room_300100003.csv": rows_to_csv(room),
+        "mock_fridge_FR0007.csv": rows_to_csv(fridge),
+        "mock_freezer_FZ0006.csv": rows_to_csv(freezer),
+        "mock_ult_ULT123456.csv": rows_to_csv(ult),
+    }
+
+
+class _MemUpload:
+    def __init__(self, name: str, data: bytes):
+        self.name = name
+        self._data = data
+
+    def read(self) -> bytes:  # pragma: no cover - Streamlit compatibility
+        return self._data
+
+    def getvalue(self) -> bytes:  # pragma: no cover - Streamlit compatibility
+        return self._data
+
+
+if st.sidebar.button("🧪 Load Mock Validation Data"):
+    st.session_state["mock_serial_files"] = [
+        _MemUpload(name, data) for name, data in _build_mock_csvs().items()
+    ]
+    st.toast("Mock data loaded. Pick September 2025 and Generate on a tab.")
 
 
 def _match_tempstick_channel(ts_df: pd.DataFrame, channel: str) -> Optional[str]:
@@ -439,14 +584,20 @@ def _apply_window(
     return df.loc[mask].copy()
 
 
+_effective_serial_files = serial_files
+if (not _effective_serial_files) and ("mock_serial_files" in st.session_state):
+    _effective_serial_files = st.session_state["mock_serial_files"]
+
+files_to_process = list(_effective_serial_files or [])
+
 serial_data: Dict[str, Dict[str, object]] = {}
 serial_to_key: Dict[str, str] = {}
 serial_frames: Dict[str, pd.DataFrame] = {}
 serial_row_counts: Dict[str, int] = {}
 total_rows = 0
-if serial_files:
+if files_to_process:
     progress = st.sidebar.progress(0.0)
-    for idx, uploaded in enumerate(serial_files, start=1):
+    for idx, uploaded in enumerate(files_to_process, start=1):
         try:
             file_bytes = uploaded.getvalue()
             parsed = _parse_cached(uploaded.name, file_bytes)
@@ -502,7 +653,7 @@ if serial_files:
                     new_len = len(df_obj)
                     total_rows += new_len - prev_len
                     serial_row_counts[key] = new_len
-        progress.progress(idx / max(len(serial_files), 1))
+        progress.progress(idx / max(len(files_to_process), 1))
     progress.empty()
 else:
     st.sidebar.info("Upload consolidated serial CSV files to begin.")
@@ -663,7 +814,9 @@ years, months = _collect_years_months(primary_dfs)
 if not years or not months:
     st.sidebar.warning("No valid timestamp data found in the uploaded serial files.")
     st.stop()
-year = st.sidebar.selectbox("Year", years, help="Detected from uploaded files.")
+year = st.sidebar.selectbox(
+    "Year", years, help="Detected from uploaded or mock files."
+)
 month = st.sidebar.selectbox(
     "Month",
     months,
@@ -1094,10 +1247,24 @@ for tab, name in zip(tabs, serial_keys):
         _show_howto_once()
         df = primary_dfs[name]
         meta = serial_metadata.get(name, {})
-        st.subheader(meta.get('tab_label') or str(name))
+        st.markdown(
+            f"<div class='fade-in'><h3 style='margin-bottom:0'>{meta.get('tab_label') or str(name)}</h3></div>",
+            unsafe_allow_html=True,
+        )
         source_label = meta.get('source_label')
         if source_label:
             st.caption(f"Source: {source_label}")
+
+        with st.expander("Preflight checks"):
+            if "DateTime" in df.columns:
+                dts = df["DateTime"].dropna().sort_values()
+                dupes = int(df["DateTime"].duplicated().sum())
+                gaps = int((dts.diff() > pd.Timedelta(minutes=10)).sum())
+                st.write(
+                    f"✅ Timestamps: {len(dts):,} | 🔁 Duplicates: {dupes} | ⏳ Gaps >10m: {gaps}"
+                )
+            else:
+                st.warning("No DateTime column detected in this serial’s combined data.")
 
         st.markdown("### Chart Details")
         chart_title_key = f"chart_title_{name}"
@@ -1343,14 +1510,22 @@ for tab, name in zip(tabs, serial_keys):
                 incident_channels,
                 combined_events,
             ) = _summarize_current_result(current_result)
+            st.markdown("<div class='fade-in-slow'>", unsafe_allow_html=True)
             kc1, kc2, kc3, kc4 = st.columns(4)
             kc1.metric("Total OOR minutes", f"{total_minutes:.0f}")
             kc2.metric("OOR events", f"{total_events}")
             kc3.metric("Incident channels (≥60m)", f"{incident_channels}")
-            parsed_files = (len(serial_files) if serial_files else 0) + (
+            parsed_files = len(files_to_process) + (
                 len(probe_files) if probe_files else 0
             )
             kc4.metric("Files parsed", f"{parsed_files}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            if fun_mode and incident_channels == 0:
+                flag_key = f"celebrate_{name}_{year}_{month}"
+                if not st.session_state.get(flag_key):
+                    st.balloons()
+                    st.session_state[flag_key] = True
 
             has_content = False
             for ch in current_result["channels"]:
@@ -1361,6 +1536,7 @@ for tab, name in zip(tabs, serial_keys):
                     st.warning(ch_result["warning"])
                     continue
                 if ch_result.get("chart"):
+                    st.markdown("<div class='fade-in'>", unsafe_allow_html=True)
                     st.altair_chart(ch_result["chart"], use_container_width=True)
                     stats = ch_result.get("stats") or {}
                     stat_lines: List[str] = []
@@ -1382,123 +1558,41 @@ for tab, name in zip(tabs, serial_keys):
                         stat_lines.append(f"Upper limit: {limit_max:.2f}")
                     if stat_lines:
                         st.caption(" | ".join(stat_lines))
+                    st.markdown("</div>", unsafe_allow_html=True)
                     has_content = True
                 if ch_result.get("oor_table") is not None:
-                    st.markdown(f"### {ch} OOR Events")
                     ev_df = ch_result["oor_table"]
-                    if not ev_df.empty:
-                        table_key = f"oor_exclusions_{name}_{ch}"
-                        toggle_key = f"oor_toggle_{name}_{ch}"
-                        st.markdown("### OOR Summary")
-                        show_selector = st.checkbox(
-                            "Show OOR Event Selection (advanced)",
-                            key=toggle_key,
-                            value=st.session_state.get(toggle_key, False),
-                            help=(
-                                "Toggle to include/exclude individual OOR events. "
-                                "When off, totals use your last saved selection (or all if none)."
-                            ),
+                    total_min = float(
+                        ch_result.get(
+                            "total_minutes",
+                            ev_df["Duration(min)"].sum() if not ev_df.empty else 0.0,
                         )
-
-                        includes = st.session_state.get(table_key)
-                        if includes is None or len(includes) != len(ev_df):
-                            includes = [True] * len(ev_df)
-                            st.session_state[table_key] = includes
-                            for idx in range(len(ev_df)):
-                                st.session_state[f"{table_key}_{idx}"] = True
-
-                        if show_selector:
-                            st.markdown("#### OOR Event Selection")
-                            cols = st.columns(3)
-
-                            def _update_row_state(values: List[bool]) -> None:
-                                for j, val in enumerate(values):
-                                    st.session_state[f"{table_key}_{j}"] = val
-
-                            if cols[0].button("Select all", key=f"sel_all_{name}_{ch}"):
-                                includes = [True] * len(ev_df)
-                                st.session_state[table_key] = includes
-                                _update_row_state(includes)
-                            if cols[1].button("Select none", key=f"sel_none_{name}_{ch}"):
-                                includes = [False] * len(ev_df)
-                                st.session_state[table_key] = includes
-                                _update_row_state(includes)
-                            if cols[2].button("Clear changes", key=f"sel_clear_{name}_{ch}"):
-                                includes = [True] * len(ev_df)
-                                st.session_state[table_key] = includes
-                                _update_row_state(includes)
-
-                            new_includes: List[bool] = []
-                            for i, row in ev_df.reset_index(drop=True).iterrows():
-                                row_key = f"{table_key}_{i}"
-                                if row_key not in st.session_state:
-                                    st.session_state[row_key] = includes[i]
-                                label = (
-                                    f"{row.get('Source', '(Merged)')} | {row['Start']} → {row['End']} "
-                                    f"({row['Duration(min)']:.1f} min)"
+                    )
+                    has_excursions = (not ev_df.empty) and (total_min > 0)
+                    if has_excursions or always_show_oor:
+                        status = "🚨 Excursions detected" if has_excursions else "✅ None detected"
+                        st.markdown(f"### {ch} OOR Events — {status}")
+                        default_open = has_excursions
+                        with st.expander("Review events / exclude rows", expanded=default_open):
+                            if not ev_df.empty:
+                                st.dataframe(ev_df, use_container_width=True)
+                                st.write(f"**Total OOR minutes:** {total_min:.1f}")
+                                st.write(
+                                    f"**Incident:** {'YES' if ch_result.get('incident') else 'No'}"
                                 )
-                                checked = bool(st.checkbox(label, key=row_key))
-                                new_includes.append(checked)
-                            includes = new_includes
-                            st.session_state[table_key] = includes
-                            _update_row_state(includes)
+                            else:
+                                st.caption("No out-of-range events in this channel.")
+                        if ch_result.get("oor_reason"):
+                            st.caption(ch_result["oor_reason"])
+                        has_content = True
+            if meta.get('descriptor'):
+                badge = meta['descriptor']
+                pulse = " pulse" if fun_mode else ""
+                st.markdown(
+                    f"<span class='range-badge{pulse}'>Profile: {badge}</span>",
+                    unsafe_allow_html=True,
+                )
 
-                        included_indices = [i for i, inc in enumerate(includes) if inc]
-                        included_df = (
-                            ev_df.iloc[included_indices] if included_indices else ev_df.iloc[[]]
-                        )
-                        total_included = (
-                            float(included_df["Duration(min)"].sum())
-                            if not included_df.empty
-                            else 0.0
-                        )
-                        incident_included = bool(
-                            total_included >= 60
-                            or (
-                                not included_df.empty
-                                and included_df["Duration(min)"].max() > 60
-                            )
-                        )
-
-                        st.write(f"**Total Included OOR minutes:** {total_included:.1f}")
-                        st.write(f"**Incident:** {'YES' if incident_included else 'No'}")
-                        if show_selector and (len(includes) != sum(includes)):
-                            excluded_indices = [
-                                i for i, inc in enumerate(includes) if not inc
-                            ]
-                            if excluded_indices:
-                                with st.expander("Excluded events"):
-                                    st.dataframe(
-                                        ev_df.iloc[excluded_indices][
-                                            [
-                                                "Source",
-                                                "Start",
-                                                "End",
-                                                "Duration(min)",
-                                            ]
-                                        ]
-                                    )
-
-                        if not included_df.empty:
-                            st.dataframe(included_df)
-                        else:
-                            st.info("All OOR events are currently excluded.")
-
-                        download_df = included_df.copy()
-                        csv_bytes = download_df.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            "Download included OOR events (CSV)",
-                            data=csv_bytes,
-                            file_name=f"{name}_{ch}_oor_events.csv",
-                            mime="text/csv",
-                            key=f"download_{table_key}",
-                            disabled=download_df.empty,
-                        )
-                    else:
-                        st.info("No out-of-range events detected.")
-                    if ch_result.get("oor_reason"):
-                        st.caption(ch_result["oor_reason"])
-                    has_content = True
             # Combined exports
             st.markdown("### Export")
             cx, cy = st.columns(2)
@@ -1522,6 +1616,25 @@ for tab, name in zip(tabs, serial_keys):
                     file_name=f"{name}_audit_summary.txt",
                     mime="text/plain",
                 )
+
+            st.markdown("### Bundle export")
+            if vlc is None:
+                st.caption(
+                    "PNG chart export requires `vl-convert-python`. It’s listed in requirements.txt. "
+                    "If missing, the ZIP will include CSV/TXT only."
+                )
+            bundle = _zip_bundle(
+                str(name),
+                combined_events,
+                audit_text,
+                current_result.get("channel_results", {}),
+            )
+            st.download_button(
+                "⬇️ Download ZIP bundle",
+                bundle,
+                file_name=f"{_sanitize(str(name))}_report_bundle.zip",
+                mime="application/zip",
+            )
 
             if has_content and st.button("Save results for this session", key=f"save_{name}"):
                 st.session_state["saved_results"].append(copy.deepcopy(current_result))
