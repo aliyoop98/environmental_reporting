@@ -176,7 +176,8 @@ def _export_chart_png(
     if vlc is None:
         return None
     export_chart = chart.properties(width=width, height=height)
-    spec = export_chart.to_dict()
+    with alt.data_transformers.disable_max_rows():
+        spec = export_chart.to_dict()
     return vlc.vegalite_to_png(spec, scale=scale)
 
 
@@ -187,6 +188,7 @@ def _zip_bundle(
     channel_results: Dict[str, Dict],
 ) -> bytes:
     mem = io.BytesIO()
+    export_log: List[str] = []
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
             f"{_sanitize(name)}_OOR_combined.csv",
@@ -202,9 +204,23 @@ def _zip_bundle(
                 )
             chart = ch_res.get("chart")
             if chart is not None:
-                png = _export_chart_png(chart)
-                if png:
-                    zf.writestr(f"{_sanitize(name)}_{_sanitize(ch)}.png", png)
+                try:
+                    png = _export_chart_png(chart)
+                    if png:
+                        zf.writestr(f"{_sanitize(name)}_{_sanitize(ch)}.png", png)
+                    else:
+                        export_log.append(
+                            f"[INFO] PNG skipped for channel '{ch}': vl-convert not installed."
+                        )
+                except Exception as exc:  # pragma: no cover - export safety net
+                    export_log.append(
+                        f"[WARN] PNG export failed for channel '{ch}': {exc}"
+                    )
+        if export_log:
+            zf.writestr(
+                f"{_sanitize(name)}_export_log.txt",
+                "\n".join(export_log),
+            )
     mem.seek(0)
     return mem.getvalue()
 
