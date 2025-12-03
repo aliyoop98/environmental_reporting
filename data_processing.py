@@ -98,6 +98,66 @@ _ZERO_WIDTH_CHARS = ("\ufeff", "\u200b", "\u200c", "\u200d")
 DEFAULT_TEMP_RANGE: Tuple[float, float] = (15, 25)
 DEFAULT_HUMIDITY_RANGE: Tuple[float, float] = (0, 60)
 
+
+def _clean_value_text(s: str) -> str:
+    """Aggressive value normalizer for robust matching."""
+
+    if s is None:
+        return ""
+
+    t = unicodedata.normalize("NFKC", str(s))
+    for z in _ZERO_WIDTH_CHARS:
+        t = t.replace(z, "")
+
+    t = t.replace("Â°", "°").replace("\u00A0", " ")
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
+
+# Regex to detect "sensor 1" / "sensor2" etc.
+_SENSOR_RE = re.compile(r"sens(?:or)?\s*0*(1|2)\b", re.IGNORECASE)
+
+
+def _classify_kind_from_text(channel_text: str, unit_text: str) -> Optional[str]:
+    """Return Temperature/Humidity classification based on text hints."""
+
+    ch = _clean_value_text(channel_text)
+    unit = _clean_value_text(unit_text)
+
+    # 1) Unit wins
+    if "%" in unit or "rh" in unit or "humidity" in unit:
+        return "Humidity"
+    if any(
+        tok in unit
+        for tok in (
+            "°c",
+            "degc",
+            " c ",
+            "celsius",
+            "°f",
+            "degf",
+            " f ",
+            "fahrenheit",
+            "degk",
+            " kelvin",
+            "k ",
+        )
+    ):
+        return "Temperature"
+
+    # 2) Sensor regex
+    m = _SENSOR_RE.search(ch)
+    if m:
+        return "Temperature" if m.group(1) == "2" else "Humidity"
+
+    # 3) Channel hints
+    if any(t in ch for t in ("rh", "humid", "%")):
+        return "Humidity"
+    if any(t in ch for t in ("temp", "°c", "°f", "degc", "degf")):
+        return "Temperature"
+
+    return None
+
 NEW_SCHEMA_ALIASES: Dict[str, Tuple[str, ...]] = {
     "Timestamp": ("timestamp", "time stamp", "date time"),
     "Serial Number": (
