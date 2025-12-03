@@ -131,6 +131,11 @@ PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
     "Freezer -80": {"temp": (-86.0, -70.0), "humi": None},
 }
 
+# Optional manual overrides for quirky serials and channels. Keys should match the
+# serial identifier, and nested keys should match channel labels after
+# normalization.
+SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {}
+
 
 def _parse_ts(value: object) -> pd.Timestamp:
     """Return a normalized timestamp using deterministic formats first."""
@@ -454,21 +459,46 @@ def _is_rh_unit(unit: str) -> bool:
 
 
 def _infer_kind_from_unit_and_value(
-    unit: str, channel: str, value: Optional[float], filename_hint: str
+    unit: str,
+    channel: str,
+    value: Optional[float],
+    filename_hint: str,
+    serial: Optional[str] = None,
+    overrides: Optional[Mapping[str, Mapping[str, str]]] = None,
+    other_channel_present: bool = False,
 ) -> str:
     """Classify a reading as Temperature or Humidity using unit-first logic."""
+
+    channel_norm = _norm(channel).lower()
+    hint_norm = _norm(filename_hint).lower()
+
+    serial_key = _norm(str(serial)) if serial else None
+    if overrides and serial_key in overrides:
+        serial_overrides = overrides[serial_key]
+        for override_channel, override_kind in serial_overrides.items():
+            if _norm(str(override_channel)).lower() == channel_norm:
+                return override_kind
 
     if _is_temp_unit(unit):
         return "Temperature"
     if _is_rh_unit(unit):
         return "Humidity"
 
-    channel_norm = _norm(channel).lower()
-    hint_norm = _norm(filename_hint).lower()
-
     if value is not None and pd.notna(value):
-        if value <= -40:
-            return "Temperature"
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            numeric_value = None
+        if numeric_value is not None:
+            if numeric_value <= -40:
+                return "Temperature"
+            if (
+                not other_channel_present
+                and -40 <= numeric_value <= 60
+                and ("sensor1" in channel_norm or "sensor 1" in channel_norm)
+                and not _norm(unit)
+            ):
+                return "Temperature"
 
     if any(
         token in hint_norm
@@ -555,39 +585,42 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
         df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
     ).astype(float)
 
-    def _infer_kind(row: pd.Series) -> str:
-        unit_value = row.get("Unit of Measure") or row.get("Unit") or ""
-        unit_text = str(unit_value).strip().lower()
-        channel_text = str(row.get("Channel", "")).strip().lower()
-        source_pieces = [
-            source_name,
-            row.get("__source_name__", ""),
-            row.get("Serial", ""),
-            row.get("Space Name", ""),
-            row.get("Space Type", ""),
+    serial_channel_presence: Dict[str, bool] = {}
+    for serial_value, group in df.groupby(df["Serial"].astype(str)):
+        normalized_serial = _norm(serial_value)
+        channel_values = [
+            _norm(ch).lower()
+            for ch in group.get("Channel", pd.Series(dtype=str))
         ]
-        source_context = " ".join(str(piece) for piece in source_pieces if piece).lower()
+        serial_channel_presence[normalized_serial] = any(
+            any(token in channel for token in ("sensor2", "sensor 2"))
+            for channel in channel_values
+        )
 
-        if "°c" in unit_text or unit_text.endswith("c"):
-            return "Temperature"
-        if "%" in unit_text:
-            return "Humidity"
-
-        if any(
-            hint in source_context
-            for hint in ["-80", "−80", "ultra low", "ultra-low", "ultralow", "ult", "ulf"]
-        ):
-            if channel_text in {"sensor1", "sensor 1"}:
-                return "Temperature"
-
-        if channel_text in {"sensor1", "sensor 1"}:
-            return "Humidity"
-        if channel_text in {"sensor2", "sensor 2"}:
-            return "Temperature"
-
-        return "Temperature"
-
-    df["Kind"] = df.apply(_infer_kind, axis=1)
+    df["Kind"] = df.apply(
+        lambda row: _infer_kind_from_unit_and_value(
+            row.get("Unit", ""),
+            row.get("Channel", ""),
+            row.get("Value"),
+            " ".join(
+                str(piece)
+                for piece in [
+                    source_name,
+                    row.get("__source_name__", ""),
+                    row.get("Serial", ""),
+                    row.get("Space Name", ""),
+                    row.get("Space Type", ""),
+                ]
+                if piece
+            ),
+            serial=row.get("Serial", ""),
+            overrides=SERIAL_KIND_OVERRIDES,
+            other_channel_present=serial_channel_presence.get(
+                _norm(row.get("Serial", "")), False
+            ),
+        ),
+        axis=1,
+    )
 
     df = df.dropna(subset=["Value"])
     if df.empty:
@@ -762,6 +795,23 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         df["Channel"] = df.get("__context__", "")
     df["Channel"] = df["Channel"].fillna("").astype(str)
 
+    serial: Optional[str] = None
+    if "Serial" in df.columns:
+        serial_series = df["Serial"].astype(str).str.strip()
+        serial_series = serial_series[serial_series != ""]
+        if not serial_series.empty:
+            try:
+                serial = serial_series.mode().iloc[0]
+            except Exception:
+                serial = serial_series.iloc[0]
+
+    serial = serial or meta.get("device_id") or meta.get("device_name") or Path(source_name).stem
+
+    has_sensor2 = any(
+        any(token in _norm(ch).lower() for token in ("sensor2", "sensor 2"))
+        for ch in df["Channel"]
+    )
+
     filename_hint = " ".join(
         filter(
             None,
@@ -769,6 +819,7 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
                 source_name,
                 meta.get("device_name"),
                 meta.get("device_id"),
+                serial,
             ],
         )
     )
@@ -781,6 +832,9 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
             ),
             row.get("Value"),
             filename_hint,
+            serial=serial,
+            overrides=SERIAL_KIND_OVERRIDES,
+            other_channel_present=has_sensor2,
         ),
         axis=1,
     )
@@ -807,18 +861,6 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     wide["Time"] = wide["DateTime"].dt.strftime("%H:%M")
     ordered = ["DateTime", "Temperature", "Humidity", "Date", "Time"]
     wide = wide[[c for c in ordered if c in wide.columns]]
-
-    serial: Optional[str] = None
-    if "Serial" in df.columns:
-        serial_series = df["Serial"].astype(str).str.strip()
-        serial_series = serial_series[serial_series != ""]
-        if not serial_series.empty:
-            try:
-                serial = serial_series.mode().iloc[0]
-            except Exception:
-                serial = serial_series.iloc[0]
-
-    serial = serial or meta.get("device_id") or meta.get("device_name") or Path(source_name).stem
 
     range_map: Dict[str, Tuple[float, float]] = {}
     _apply_inferred_ranges(range_map, source_name, serial, meta.get("device_name"))
