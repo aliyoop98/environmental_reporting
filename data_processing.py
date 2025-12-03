@@ -509,8 +509,25 @@ def _alias_col(df: pd.DataFrame, wanted: str, aliases: Iterable[str]) -> Optiona
 
 
 def _is_temp_unit(unit: str) -> bool:
-    value = _norm(unit).lower()
-    return any(token in value for token in ["°c", " deg c", "degc", " c", "celsius"])
+    # Normalise common mojibake (Â°) and collapse whitespace
+    fixed = (unit or "").replace("Â°", "°")
+    value = _norm(fixed).lower()
+    # Support both Celsius and Fahrenheit tokens
+    return any(
+        token in value
+        for token in [
+            "°c",
+            " deg c",
+            "degc",
+            " c",
+            "celsius",
+            "°f",
+            " deg f",
+            "degf",
+            " f",
+            "fahrenheit",
+        ]
+    )
 
 
 def _is_rh_unit(unit: str) -> bool:
@@ -567,9 +584,10 @@ def _infer_kind_from_unit_and_value(
         if "sensor1" in channel_norm or "sensor 1" in channel_norm:
             return "Temperature"
 
-    if any(token in channel_norm for token in ("sensor2", "sensor 2", "temp")):
+    # Accept 0-padded variants too (sensor02)
+    if any(token in channel_norm for token in ("sensor2", "sensor 2", "sensor02", "sensor 02", "temp")):
         return "Temperature"
-    if any(token in channel_norm for token in ("sensor1", "sensor 1", "hum", "rh", "%")):
+    if any(token in channel_norm for token in ("sensor1", "sensor 1", "sensor01", "sensor 01", "hum", "rh", "%")):
         return "Humidity"
 
     return "Temperature"
@@ -645,6 +663,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
         df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
     ).astype(float)
 
+    # Derive a unit token from the Data field when Unit is blank/garbled
+    # (e.g., "19.84 °C" or "66.2 %").
+    df["UnitToken"] = df["Unit"].astype(str)
+    empty_unit_mask = df["UnitToken"].str.strip() == ""
+    unit_from_data = df["Data"].astype(str).str.extract(r"(%|°\s*[CF]|[CF]\s*°)", expand=False)
+    df.loc[empty_unit_mask, "UnitToken"] = unit_from_data[empty_unit_mask].fillna("")
+
     serial_channel_presence: Dict[str, bool] = {}
     for serial_value, group in df.groupby(df["Serial"].astype(str)):
         normalized_serial = _norm(serial_value)
@@ -653,13 +678,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             for ch in group.get("Channel", pd.Series(dtype=str))
         ]
         serial_channel_presence[normalized_serial] = any(
-            any(token in channel for token in ("sensor2", "sensor 2"))
+            any(token in channel for token in ("sensor2", "sensor 2", "sensor02", "sensor 02"))
             for channel in channel_values
         )
 
     df["Kind"] = df.apply(
         lambda row: _infer_kind_from_unit_and_value(
-            row.get("Unit", ""),
+            row.get("UnitToken", ""),
             row.get("Channel", ""),
             row.get("Value"),
             " ".join(
