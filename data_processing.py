@@ -752,7 +752,14 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
 
     # Prefer unit-based classification first; fall back to legacy heuristic.
     def _row_kind(row):
-        k = _classify_measurement(row.get("Channel", ""), row.get("UnitToken", ""))
+        normalized_serial = _norm(row.get("Serial", ""))
+        other_channel_present = serial_channel_presence.get(normalized_serial, False)
+
+        k = _classify_measurement(
+            row.get("Channel", ""),
+            row.get("UnitToken", ""),
+            allow_sensor_fallback=other_channel_present,
+        )
         if k:
             return k
         return _infer_kind_from_unit_and_value(
@@ -772,9 +779,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             ),
             serial=row.get("Serial", ""),
             overrides=SERIAL_KIND_OVERRIDES,
-            other_channel_present=serial_channel_presence.get(
-                _norm(row.get("Serial", "")), False
-            ),
+            other_channel_present=other_channel_present,
             channel_context=row.get("__context__", ""),
         )
 
@@ -1217,7 +1222,9 @@ def _match_new_schema_columns(columns: Iterable[str]) -> Optional[Dict[str, str]
     return matches
 
 
-def _classify_measurement(channel: str, unit: str) -> Optional[str]:
+def _classify_measurement(
+    channel: str, unit: str, *, allow_sensor_fallback: bool = True
+) -> Optional[str]:
     """Return canonical measurement name using unit, hints, then sensor fallback."""
 
     channel = (channel or "").strip().lower()
@@ -1283,12 +1290,13 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
         return "Temperature"
 
     # 3) Fallback based on sensor numbering when available.
-    if sensor_id == "2":
-        dprint("[classify] -> Temperature (sensor2 fallback)")
-        return "Temperature"
-    if sensor_id == "1":
-        dprint("[classify] -> Humidity (sensor1 fallback)")
-        return "Humidity"
+    if allow_sensor_fallback:
+        if sensor_id == "2":
+            dprint("[classify] -> Temperature (sensor2 fallback)")
+            return "Temperature"
+        if sensor_id == "1":
+            dprint("[classify] -> Humidity (sensor1 fallback)")
+            return "Humidity"
 
     # 4) Last resort heuristics from channel text.
     if any(token in channel for token in ("hum", "rh", "%")):
