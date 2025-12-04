@@ -15,6 +15,13 @@ from typing import Dict, Optional
 import pandas as pd
 
 
+SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "250269655": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250269656": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250259653": {"sensor1": "Humidity", "sensor2": "Temperature"},
+}
+
+
 def _read_text(path: str) -> str:
     """Read a CSV file as text handling BOMs and stray null bytes."""
 
@@ -103,11 +110,18 @@ def _normalize_text(value: object) -> str:
     return text.lower()
 
 
+def _normalize_channel_key(value: object) -> str:
+    """Return a compact, alphanumeric-only channel key for comparisons."""
+
+    normalized = _normalize_text(value)
+    return "".join(char for char in normalized if char.isalnum())
+
+
 def _classify_channel(channel: str, unit: str) -> Optional[str]:
     """Classify a Traceable measurement into Temperature or Humidity."""
 
     channel_norm = _normalize_text(channel)
-    channel_key = channel_norm.replace(" ", "")
+    channel_key = _normalize_channel_key(channel)
     unit_norm = _normalize_text(unit)
 
     direct_map = {
@@ -135,6 +149,23 @@ def _classify_channel(channel: str, unit: str) -> Optional[str]:
 
     if channel_norm in {"temperature", "humidity"}:
         return channel_norm.capitalize()
+
+    return None
+
+
+def _apply_serial_override(serial: str, channel: str) -> Optional[str]:
+    """Return a forced kind for a serial/channel pair when configured."""
+
+    serial_str = str(serial).strip()
+    if not serial_str or serial_str not in SERIAL_KIND_OVERRIDES:
+        return None
+
+    overrides = SERIAL_KIND_OVERRIDES[serial_str]
+    channel_key = _normalize_channel_key(channel)
+
+    for candidate, kind in overrides.items():
+        if _normalize_channel_key(candidate) == channel_key:
+            return kind
 
     return None
 
@@ -176,8 +207,9 @@ def _new_format_to_dataframes(
     else:
         unit_values = pd.Series([""] * len(df), index=df.index)
     df[measurement_col] = [
-        _classify_channel(channel, unit)
-        for channel, unit in zip(channel_values, unit_values)
+        _apply_serial_override(serial, channel)
+        or _classify_channel(channel, unit)
+        for serial, channel, unit in zip(df[serial_col], channel_values, unit_values)
     ]
     df = df.dropna(subset=[measurement_col])
 
