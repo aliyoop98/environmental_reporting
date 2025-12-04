@@ -568,7 +568,6 @@ def _infer_kind_from_unit_and_value(
     channel_norm = _norm(channel).lower()
     channel_key = _normalize_channel_key(channel)
     hint_norm = _norm(" ".join(filter(None, [filename_hint, channel_context]))).lower()
-    hint_norm = _norm(filename_hint).lower()
 
     serial_key = _norm(str(serial)) if serial else None
     if overrides and serial_key in overrides:

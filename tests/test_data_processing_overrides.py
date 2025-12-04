@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from data_processing import parse_serial_csv
+from data_processing import _infer_kind_from_unit_and_value, parse_serial_csv
 
 
 def test_serial_overrides_apply_with_noisy_channels_and_units():
@@ -45,3 +45,18 @@ def test_serial_overrides_with_comma_decimal_values():
     df = frames["250269655"]["df"]
     assert df["Temperature"].iloc[0] == 19.84
     assert df["Humidity"].iloc[0] == 66.2
+
+
+def test_channel_context_can_indicate_temperature_for_sensor1():
+    kind = _infer_kind_from_unit_and_value(
+        unit="",
+        channel="Sensor 1",
+        value=None,
+        filename_hint="Traceable",
+        serial="ULT-01",
+        overrides=None,
+        other_channel_present=False,
+        channel_context="Channel Data for ULT -80 Freezer",
+    )
+
+    assert kind == "Temperature"
