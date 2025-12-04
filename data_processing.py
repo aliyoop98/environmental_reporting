@@ -17,7 +17,7 @@ def _read_any_csv(file_obj) -> pd.DataFrame:
     else:
         text = str(raw)
 
-    for sep in (None, ",", "\t"):
+    for sep in (None, ",", "\t", ";"):
         try:
             df = pd.read_csv(
                 io.StringIO(text),
@@ -39,7 +39,7 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
     """Backward-compatible CSV reader used by legacy probe parsing code."""
 
     cleaned = _strip_bom_and_zero_width(text)
-    for sep in (None, ",", "\t"):
+    for sep in (None, ",", "\t", ";"):
         try:
             df = pd.read_csv(
                 io.StringIO(cleaned),
@@ -112,6 +112,31 @@ def _clean_value_text(s: str) -> str:
     t = t.replace("Â°", "°").replace("\u00A0", " ")
     t = re.sub(r"\s+", " ", t).strip().lower()
     return t
+
+
+def _parse_numeric_value(text: object) -> Optional[float]:
+    """Return a float parsed from messy numeric text.
+
+    Handles both comma and period decimal separators and ignores stray symbols.
+    """
+
+    if text is None:
+        return None
+
+    cleaned = _clean_value_text(str(text))
+    if not cleaned:
+        return None
+
+    # Accept either "," or "." as the decimal separator and drop thousands separators.
+    normalized = cleaned.replace(",", ".")
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", normalized)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
 
 
 # Normalize channel labels and override keys to an alphanumeric form so that
@@ -536,11 +561,13 @@ def _infer_kind_from_unit_and_value(
     serial: Optional[str] = None,
     overrides: Optional[Mapping[str, Mapping[str, str]]] = None,
     other_channel_present: bool = False,
+    channel_context: str = "",
 ) -> str:
     """Classify a reading as Temperature or Humidity using unit-first logic."""
 
     channel_norm = _norm(channel).lower()
     channel_key = _normalize_channel_key(channel)
+    hint_norm = _norm(" ".join(filter(None, [filename_hint, channel_context]))).lower()
     hint_norm = _norm(filename_hint).lower()
 
     serial_key = _norm(str(serial)) if serial else None
@@ -654,9 +681,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     if df.empty:
         return []
 
-    df["Value"] = (
-        df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
-    ).astype(float)
+    df["Value"] = df["Data"].apply(_parse_numeric_value)
 
     # Derive a unit token from the Data field when Unit is blank/garbled
     # (e.g., "19.84 °C" or "66.2 %").
@@ -698,6 +723,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             other_channel_present=serial_channel_presence.get(
                 _norm(row.get("Serial", "")), False
             ),
+            channel_context=row.get("__context__", ""),
         ),
         axis=1,
     )
@@ -907,14 +933,13 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     df["Kind"] = df.apply(
         lambda row: _infer_kind_from_unit_and_value(
             row.get("Unit", ""),
-            " ".join(
-                filter(None, [row.get("Channel", ""), row.get("__context__", "")])
-            ),
+            row.get("Channel", ""),
             row.get("Value"),
             filename_hint,
             serial=serial,
             overrides=SERIAL_KIND_OVERRIDES,
             other_channel_present=has_sensor2,
+            channel_context=row.get("__context__", ""),
         ),
         axis=1,
     )
