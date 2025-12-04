@@ -17,7 +17,7 @@ def _read_any_csv(file_obj) -> pd.DataFrame:
     else:
         text = str(raw)
 
-    for sep in (None, ",", "\t"):
+    for sep in (None, ",", "\t", ";"):
         try:
             df = pd.read_csv(
                 io.StringIO(text),
@@ -39,7 +39,7 @@ def _read_csv_flexible(text: str) -> Optional[pd.DataFrame]:
     """Backward-compatible CSV reader used by legacy probe parsing code."""
 
     cleaned = _strip_bom_and_zero_width(text)
-    for sep in (None, ",", "\t"):
+    for sep in (None, ",", "\t", ";"):
         try:
             df = pd.read_csv(
                 io.StringIO(cleaned),
@@ -112,6 +112,37 @@ def _clean_value_text(s: str) -> str:
     t = t.replace("Â°", "°").replace("\u00A0", " ")
     t = re.sub(r"\s+", " ", t).strip().lower()
     return t
+
+
+def _parse_numeric_value(text: object) -> Optional[float]:
+    """Return a float parsed from messy numeric text.
+
+    Handles both comma and period decimal separators and ignores stray symbols.
+    """
+
+    if text is None:
+        return None
+
+    cleaned = _clean_value_text(str(text))
+    if not cleaned:
+        return None
+
+    # Accept either "," or "." as the decimal separator and drop thousands separators.
+    normalized = cleaned.replace(",", ".")
+    match = re.search(r"[-+]?((?:\d+(?:\.\d+)?)|(?:\.\d+))", normalized)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+# Normalize channel labels and override keys to an alphanumeric form so that
+# variants like ``Sensor-2`` and ``sensor 2`` compare equal.
+def _normalize_channel_key(text: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _clean_value_text(str(text)))
 
 
 # Regex to detect "sensor 1" / "sensor2" etc.
@@ -194,7 +225,11 @@ PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
 # Optional manual overrides for quirky serials and channels. Keys should match the
 # serial identifier, and nested keys should match channel labels after
 # normalization.
-SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {}
+SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "250269655": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250269656": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250259653": {"sensor1": "Humidity", "sensor2": "Temperature"},
+}
 
 
 def _parse_ts(value: object) -> pd.Timestamp:
@@ -509,12 +544,12 @@ def _alias_col(df: pd.DataFrame, wanted: str, aliases: Iterable[str]) -> Optiona
 
 
 def _is_temp_unit(unit: str) -> bool:
-    value = _norm(unit).lower()
+    value = _clean_value_text(unit)
     return any(token in value for token in ["°c", " deg c", "degc", " c", "celsius"])
 
 
 def _is_rh_unit(unit: str) -> bool:
-    value = _norm(unit).lower()
+    value = _clean_value_text(unit)
     return "%" in value or "rh" in value or "humidity" in value
 
 
@@ -526,17 +561,19 @@ def _infer_kind_from_unit_and_value(
     serial: Optional[str] = None,
     overrides: Optional[Mapping[str, Mapping[str, str]]] = None,
     other_channel_present: bool = False,
+    channel_context: str = "",
 ) -> str:
     """Classify a reading as Temperature or Humidity using unit-first logic."""
 
     channel_norm = _norm(channel).lower()
-    hint_norm = _norm(filename_hint).lower()
+    channel_key = _normalize_channel_key(channel)
+    hint_norm = _norm(" ".join(filter(None, [filename_hint, channel_context]))).lower()
 
     serial_key = _norm(str(serial)) if serial else None
     if overrides and serial_key in overrides:
         serial_overrides = overrides[serial_key]
         for override_channel, override_kind in serial_overrides.items():
-            if _norm(str(override_channel)).lower() == channel_norm:
+            if _normalize_channel_key(override_channel) == channel_key:
                 return override_kind
 
     if _is_temp_unit(unit):
@@ -567,9 +604,11 @@ def _infer_kind_from_unit_and_value(
         if "sensor1" in channel_norm or "sensor 1" in channel_norm:
             return "Temperature"
 
-    if any(token in channel_norm for token in ("sensor2", "sensor 2", "temp")):
+    if any(token in channel_key for token in ("sensor2", "sensor02")):
         return "Temperature"
-    if any(token in channel_norm for token in ("sensor1", "sensor 1", "hum", "rh", "%")):
+    if any(token in channel_key for token in ("sensor1", "sensor01")):
+        return "Humidity"
+    if any(token in channel_norm for token in ("hum", "rh", "%")):
         return "Humidity"
 
     return "Temperature"
@@ -641,9 +680,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     if df.empty:
         return []
 
-    df["Value"] = (
-        df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
-    ).astype(float)
+    df["Value"] = df["Data"].apply(_parse_numeric_value)
 
     serial_channel_presence: Dict[str, bool] = {}
     for serial_value, group in df.groupby(df["Serial"].astype(str)):
@@ -678,6 +715,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             other_channel_present=serial_channel_presence.get(
                 _norm(row.get("Serial", "")), False
             ),
+            channel_context=row.get("__context__", ""),
         ),
         axis=1,
     )
@@ -887,14 +925,13 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     df["Kind"] = df.apply(
         lambda row: _infer_kind_from_unit_and_value(
             row.get("Unit", ""),
-            " ".join(
-                filter(None, [row.get("Channel", ""), row.get("__context__", "")])
-            ),
+            row.get("Channel", ""),
             row.get("Value"),
             filename_hint,
             serial=serial,
             overrides=SERIAL_KIND_OVERRIDES,
             other_channel_present=has_sensor2,
+            channel_context=row.get("__context__", ""),
         ),
         axis=1,
     )
