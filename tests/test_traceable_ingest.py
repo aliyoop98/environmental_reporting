@@ -52,3 +52,23 @@ def test_ingest_traceable_csv_includes_missing_channel(tmp_path):
     assert list(df.columns) == ["DateTime", "Temperature", "Humidity"]
     assert df["Humidity"].isna().all()
     assert df["Temperature"].tolist() == [5.0, 5.1]
+
+
+def test_ingest_traceable_respects_serial_overrides(tmp_path):
+    csv_text = "\n".join(
+        [
+            "Timestamp,Serial Number,Channel,Data,Unit of Measure",
+            "2024-03-01 00:00:00,250269656,Sensor-2,7.0,",  # noisy channel, blank unit
+            "2024-03-01 00:00:00,250269656,Sensor-1,40,",  # noisy channel, blank unit
+            "",
+        ]
+    )
+    csv_path = tmp_path / "override.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    results = ingest_traceable_csv(str(csv_path))
+
+    df = results["250269656"]
+    assert list(df.columns) == ["DateTime", "Temperature", "Humidity"]
+    assert df["Temperature"].tolist() == [7.0]
+    assert df["Humidity"].tolist() == [40.0]
