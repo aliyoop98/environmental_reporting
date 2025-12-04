@@ -114,6 +114,12 @@ def _clean_value_text(s: str) -> str:
     return t
 
 
+# Normalize channel labels and override keys to an alphanumeric form so that
+# variants like ``Sensor-2`` and ``sensor 2`` compare equal.
+def _normalize_channel_key(text: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _clean_value_text(str(text)))
+
+
 # Regex to detect "sensor 1" / "sensor2" etc.
 _SENSOR_RE = re.compile(r"sens(?:or)?\s*0*(1|2)\b", re.IGNORECASE)
 
@@ -194,7 +200,11 @@ PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
 # Optional manual overrides for quirky serials and channels. Keys should match the
 # serial identifier, and nested keys should match channel labels after
 # normalization.
-SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {}
+SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "250269655": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250269656": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250259653": {"sensor1": "Humidity", "sensor2": "Temperature"},
+}
 
 
 def _parse_ts(value: object) -> pd.Timestamp:
@@ -509,29 +519,12 @@ def _alias_col(df: pd.DataFrame, wanted: str, aliases: Iterable[str]) -> Optiona
 
 
 def _is_temp_unit(unit: str) -> bool:
-    # Normalise common mojibake (Â°) and collapse whitespace
-    fixed = (unit or "").replace("Â°", "°")
-    value = _norm(fixed).lower()
-    # Support both Celsius and Fahrenheit tokens
-    return any(
-        token in value
-        for token in [
-            "°c",
-            " deg c",
-            "degc",
-            " c",
-            "celsius",
-            "°f",
-            " deg f",
-            "degf",
-            " f",
-            "fahrenheit",
-        ]
-    )
+    value = _clean_value_text(unit)
+    return any(token in value for token in ["°c", " deg c", "degc", " c", "celsius"])
 
 
 def _is_rh_unit(unit: str) -> bool:
-    value = _norm(unit).lower()
+    value = _clean_value_text(unit)
     return "%" in value or "rh" in value or "humidity" in value
 
 
@@ -547,13 +540,14 @@ def _infer_kind_from_unit_and_value(
     """Classify a reading as Temperature or Humidity using unit-first logic."""
 
     channel_norm = _norm(channel).lower()
+    channel_key = _normalize_channel_key(channel)
     hint_norm = _norm(filename_hint).lower()
 
     serial_key = _norm(str(serial)) if serial else None
     if overrides and serial_key in overrides:
         serial_overrides = overrides[serial_key]
         for override_channel, override_kind in serial_overrides.items():
-            if _norm(str(override_channel)).lower() == channel_norm:
+            if _normalize_channel_key(override_channel) == channel_key:
                 return override_kind
 
     if _is_temp_unit(unit):
@@ -584,10 +578,11 @@ def _infer_kind_from_unit_and_value(
         if "sensor1" in channel_norm or "sensor 1" in channel_norm:
             return "Temperature"
 
-    # Accept 0-padded variants too (sensor02)
-    if any(token in channel_norm for token in ("sensor2", "sensor 2", "sensor02", "sensor 02", "temp")):
+    if any(token in channel_key for token in ("sensor2", "sensor02")):
         return "Temperature"
-    if any(token in channel_norm for token in ("sensor1", "sensor 1", "sensor01", "sensor 01", "hum", "rh", "%")):
+    if any(token in channel_key for token in ("sensor1", "sensor01")):
+        return "Humidity"
+    if any(token in channel_norm for token in ("hum", "rh", "%")):
         return "Humidity"
 
     return "Temperature"
