@@ -561,12 +561,13 @@ def _infer_kind_from_unit_and_value(
     serial: Optional[str] = None,
     overrides: Optional[Mapping[str, Mapping[str, str]]] = None,
     other_channel_present: bool = False,
+    channel_context: str = "",
 ) -> str:
     """Classify a reading as Temperature or Humidity using unit-first logic."""
 
     channel_norm = _norm(channel).lower()
     channel_key = _normalize_channel_key(channel)
-    hint_norm = _norm(filename_hint).lower()
+    hint_norm = _norm(" ".join(filter(None, [filename_hint, channel_context]))).lower()
 
     serial_key = _norm(str(serial)) if serial else None
     if overrides and serial_key in overrides:
@@ -714,6 +715,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             other_channel_present=serial_channel_presence.get(
                 _norm(row.get("Serial", "")), False
             ),
+            channel_context=row.get("__context__", ""),
         ),
         axis=1,
     )
@@ -923,14 +925,13 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     df["Kind"] = df.apply(
         lambda row: _infer_kind_from_unit_and_value(
             row.get("Unit", ""),
-            " ".join(
-                filter(None, [row.get("Channel", ""), row.get("__context__", "")])
-            ),
+            row.get("Channel", ""),
             row.get("Value"),
             filename_hint,
             serial=serial,
             overrides=SERIAL_KIND_OVERRIDES,
             other_channel_present=has_sensor2,
+            channel_context=row.get("__context__", ""),
         ),
         axis=1,
     )
