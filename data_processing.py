@@ -5,7 +5,17 @@ from itertools import chain
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
+import os
+
 import pandas as pd
+
+# Debug toggler: set ER_DEBUG=1 to enable verbose parse logs
+DEBUG = os.getenv("ER_DEBUG", "0") == "1"
+
+
+def dprint(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
 
 
 def _read_any_csv(file_obj) -> pd.DataFrame:
@@ -198,6 +208,9 @@ NEW_SCHEMA_ALIASES: Dict[str, Tuple[str, ...]] = {
         "serial no",
         "serial #",
         "serial#",
+        "device id",
+        "device identifier",
+        "device",
     ),
     "Channel": (
         "channel",
@@ -543,13 +556,34 @@ def _alias_col(df: pd.DataFrame, wanted: str, aliases: Iterable[str]) -> Optiona
     return None
 
 
-def _is_temp_unit(unit: str) -> bool:
-    value = _clean_value_text(unit)
-    return any(token in value for token in ["°c", " deg c", "degc", " c", "celsius"])
+def _normalize_unit_text(unit: object) -> str:
+    """Normalize common mojibake & spacing so we can reliably detect units."""
+
+    s = "" if unit is None else str(unit)
+    # Fix common encoding artifact: 'Â°' -> '°'
+    s = s.replace("Â°", "°").replace("\u00B0", "°")
+    # Collapse whitespace (handles things like ' °C')
+    s = re.sub(r"\s+", " ", s.strip())
+    return s
 
 
-def _is_rh_unit(unit: str) -> bool:
-    value = _clean_value_text(unit)
+def _is_temp_unit(unit: object) -> bool:
+    value = _normalize_unit_text(unit).lower()
+    compact = value.replace(" ", "")
+    return bool(
+        re.search(r"°\s*[cf]\b", value)
+        or "°c" in compact
+        or "°f" in compact
+        or "degc" in value
+        or "deg f" in value
+        or "celsius" in value
+        or "fahrenheit" in value
+        or value.strip() in {"c", "f"}  # bare symbol in some exports
+    )
+
+
+def _is_rh_unit(unit: object) -> bool:
+    value = _normalize_unit_text(unit).lower()
     return "%" in value or "rh" in value or "humidity" in value
 
 
@@ -568,17 +602,25 @@ def _infer_kind_from_unit_and_value(
     channel_norm = _norm(channel).lower()
     channel_key = _normalize_channel_key(channel)
     hint_norm = _norm(" ".join(filter(None, [filename_hint, channel_context]))).lower()
+    unit_norm = _normalize_unit_text(unit)
+    dprint(
+        f"[infer] serial={serial}  channel='{channel}'  unit='{unit_norm}'  "
+        f"value={value}  hint='{hint_norm}'  other_sensor2={other_channel_present}"
+    )
 
     serial_key = _norm(str(serial)) if serial else None
     if overrides and serial_key in overrides:
         serial_overrides = overrides[serial_key]
         for override_channel, override_kind in serial_overrides.items():
             if _normalize_channel_key(override_channel) == channel_key:
+                dprint(f"[infer] -> {override_kind} (override for channel '{override_channel}')")
                 return override_kind
 
     if _is_temp_unit(unit):
+        dprint("[infer] -> Temperature (unit)")
         return "Temperature"
     if _is_rh_unit(unit):
+        dprint("[infer] -> Humidity (unit)")
         return "Humidity"
 
     if value is not None and pd.notna(value):
@@ -588,6 +630,7 @@ def _infer_kind_from_unit_and_value(
             numeric_value = None
         if numeric_value is not None:
             if numeric_value <= -40:
+                dprint("[infer] -> Temperature (very low numeric value)")
                 return "Temperature"
             if (
                 not other_channel_present
@@ -595,6 +638,7 @@ def _infer_kind_from_unit_and_value(
                 and ("sensor1" in channel_norm or "sensor 1" in channel_norm)
                 and not _norm(unit)
             ):
+                dprint("[infer] -> Temperature (single-channel fallback: sensor1 & no unit)")
                 return "Temperature"
 
     if any(
@@ -602,15 +646,20 @@ def _infer_kind_from_unit_and_value(
         for token in ["-80", "−80", "ultra low", "ultra-low", "ultralow", "ult", "ulf"]
     ):
         if "sensor1" in channel_norm or "sensor 1" in channel_norm:
+            dprint("[infer] -> Temperature (ULT hint + sensor1)")
             return "Temperature"
 
     if any(token in channel_key for token in ("sensor2", "sensor02")):
+        dprint("[infer] -> Temperature (channel text)")
         return "Temperature"
     if any(token in channel_key for token in ("sensor1", "sensor01")):
+        dprint("[infer] -> Humidity (channel text)")
         return "Humidity"
     if any(token in channel_norm for token in ("hum", "rh", "%")):
+        dprint("[infer] -> Humidity (channel text)")
         return "Humidity"
 
+    dprint("[infer] -> Temperature (last resort)")
     return "Temperature"
 
 
@@ -701,8 +750,19 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             for channel in channel_values
         )
 
-    df["Kind"] = df.apply(
-        lambda row: _infer_kind_from_unit_and_value(
+    # Prefer unit-based classification first; fall back to legacy heuristic.
+    def _row_kind(row):
+        normalized_serial = _norm(row.get("Serial", ""))
+        other_channel_present = serial_channel_presence.get(normalized_serial, False)
+
+        k = _classify_measurement(
+            row.get("Channel", ""),
+            row.get("UnitToken", ""),
+            allow_sensor_fallback=other_channel_present,
+        )
+        if k:
+            return k
+        return _infer_kind_from_unit_and_value(
             row.get("UnitToken", ""),
             row.get("Channel", ""),
             row.get("Value"),
@@ -719,13 +779,17 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             ),
             serial=row.get("Serial", ""),
             overrides=SERIAL_KIND_OVERRIDES,
-            other_channel_present=serial_channel_presence.get(
-                _norm(row.get("Serial", "")), False
-            ),
+            other_channel_present=other_channel_present,
             channel_context=row.get("__context__", ""),
-        ),
-        axis=1,
-    )
+        )
+
+    df["Kind"] = df.apply(_row_kind, axis=1)
+    # Quick visibility for stubborn rows
+    if DEBUG:
+        bad = df[df["Kind"].isna() | (df["Kind"] == "")]
+        if not bad.empty:
+            sample = bad.head(10)[["Timestamp", "Serial", "Channel", "Unit", "Data"]]
+            dprint(f"[consolidated] Unclassified rows sample:\n{sample.to_string(index=False)}")
 
     df = df.dropna(subset=["Value"])
     if df.empty:
@@ -1158,17 +1222,20 @@ def _match_new_schema_columns(columns: Iterable[str]) -> Optional[Dict[str, str]
     return matches
 
 
-def _classify_measurement(channel: str, unit: str) -> Optional[str]:
+def _classify_measurement(
+    channel: str, unit: str, *, allow_sensor_fallback: bool = True
+) -> Optional[str]:
     """Return canonical measurement name using unit, hints, then sensor fallback."""
 
     channel = (channel or "").strip().lower()
-    unit = (unit or "").strip().lower()
+    raw_unit = unit
+    unit = _normalize_unit_text(unit).lower()
+    compact = unit.replace(" ", "")
 
-    # Normalise the unit text so we can reliably inspect the tokens regardless of
-    # punctuation, case, or unicode symbols (e.g. "Â°C").
-    unit_fixed = unit.replace("Â°", "°")
+    dprint(f"[classify] ch='{channel}'  unit_raw='{raw_unit}'  unit='{unit}'  compact='{compact}'")
+
     unit_normalised = (
-        unit_fixed.replace("°", " ")
+        unit.replace("°", " ")
         .replace("degrees", "deg")
         .replace("/", " ")
         .replace("-", " ")
@@ -1178,7 +1245,8 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
 
     # 1) Unit-based classification takes precedence.
     humidity_tokens = {"%", "percent", "humidity", "humid", "rh"}
-    if "%" in unit_fixed or unit_tokens & humidity_tokens:
+    if "%" in unit or unit_tokens & humidity_tokens:
+        dprint("[classify] -> Humidity (unit)")
         return "Humidity"
 
     temperature_tokens = {
@@ -1194,11 +1262,8 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
         "k",
         "kelvin",
     }
-    if (
-        unit_tokens & temperature_tokens
-        or "°c" in unit_fixed
-        or "°f" in unit_fixed
-    ):
+    if (unit_tokens & temperature_tokens) or "°c" in compact or "°f" in compact:
+        dprint("[classify] -> Temperature (unit)")
         return "Temperature"
 
     # 2) Hint-based classification for ULT / -80 profiles.
@@ -1221,20 +1286,27 @@ def _classify_measurement(channel: str, unit: str) -> Optional[str]:
         sensor_id = None
 
     if sensor_id == "1" and any(hint in channel for hint in ult_hints):
+        dprint("[classify] -> Temperature (ULT hint + sensor1)")
         return "Temperature"
 
     # 3) Fallback based on sensor numbering when available.
-    if sensor_id == "2":
-        return "Temperature"
-    if sensor_id == "1":
-        return "Humidity"
+    if allow_sensor_fallback:
+        if sensor_id == "2":
+            dprint("[classify] -> Temperature (sensor2 fallback)")
+            return "Temperature"
+        if sensor_id == "1":
+            dprint("[classify] -> Humidity (sensor1 fallback)")
+            return "Humidity"
 
     # 4) Last resort heuristics from channel text.
     if any(token in channel for token in ("hum", "rh", "%")):
+        dprint("[classify] -> Humidity (channel text)")
         return "Humidity"
     if any(token in channel for token in ("temp", "°c", "°f")):
+        dprint("[classify] -> Temperature (channel text)")
         return "Temperature"
 
+    dprint("[classify] -> None (could not decide)")
     return None
 
 
