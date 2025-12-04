@@ -658,6 +658,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
         df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
     ).astype(float)
 
+    # Derive a unit token from the Data field when Unit is blank/garbled
+    # (e.g., "19.84 °C" or "66.2 %").
+    df["UnitToken"] = df["Unit"].astype(str)
+    empty_unit_mask = df["UnitToken"].str.strip() == ""
+    unit_from_data = df["Data"].astype(str).str.extract(r"(%|°\s*[CF]|[CF]\s*°)", expand=False)
+    df.loc[empty_unit_mask, "UnitToken"] = unit_from_data[empty_unit_mask].fillna("")
+
     serial_channel_presence: Dict[str, bool] = {}
     for serial_value, group in df.groupby(df["Serial"].astype(str)):
         normalized_serial = _norm(serial_value)
@@ -666,13 +673,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             for ch in group.get("Channel", pd.Series(dtype=str))
         ]
         serial_channel_presence[normalized_serial] = any(
-            any(token in channel for token in ("sensor2", "sensor 2"))
+            any(token in channel for token in ("sensor2", "sensor 2", "sensor02", "sensor 02"))
             for channel in channel_values
         )
 
     df["Kind"] = df.apply(
         lambda row: _infer_kind_from_unit_and_value(
-            row.get("Unit", ""),
+            row.get("UnitToken", ""),
             row.get("Channel", ""),
             row.get("Value"),
             " ".join(
