@@ -129,7 +129,7 @@ def _parse_numeric_value(text: object) -> Optional[float]:
 
     # Accept either "," or "." as the decimal separator and drop thousands separators.
     normalized = cleaned.replace(",", ".")
-    match = re.search(r"[-+]?((?:\d+(?:\.\d+)?)|(?:\.\d+))", normalized)
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", normalized)
     if not match:
         return None
 
@@ -568,6 +568,7 @@ def _infer_kind_from_unit_and_value(
     channel_norm = _norm(channel).lower()
     channel_key = _normalize_channel_key(channel)
     hint_norm = _norm(" ".join(filter(None, [filename_hint, channel_context]))).lower()
+    hint_norm = _norm(filename_hint).lower()
 
     serial_key = _norm(str(serial)) if serial else None
     if overrides and serial_key in overrides:
@@ -682,6 +683,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
 
     df["Value"] = df["Data"].apply(_parse_numeric_value)
 
+    # Derive a unit token from the Data field when Unit is blank/garbled
+    # (e.g., "19.84 °C" or "66.2 %").
+    df["UnitToken"] = df["Unit"].astype(str)
+    empty_unit_mask = df["UnitToken"].str.strip() == ""
+    unit_from_data = df["Data"].astype(str).str.extract(r"(%|°\s*[CF]|[CF]\s*°)", expand=False)
+    df.loc[empty_unit_mask, "UnitToken"] = unit_from_data[empty_unit_mask].fillna("")
+
     serial_channel_presence: Dict[str, bool] = {}
     for serial_value, group in df.groupby(df["Serial"].astype(str)):
         normalized_serial = _norm(serial_value)
@@ -690,13 +698,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             for ch in group.get("Channel", pd.Series(dtype=str))
         ]
         serial_channel_presence[normalized_serial] = any(
-            any(token in channel for token in ("sensor2", "sensor 2"))
+            any(token in channel for token in ("sensor2", "sensor 2", "sensor02", "sensor 02"))
             for channel in channel_values
         )
 
     df["Kind"] = df.apply(
         lambda row: _infer_kind_from_unit_and_value(
-            row.get("Unit", ""),
+            row.get("UnitToken", ""),
             row.get("Channel", ""),
             row.get("Value"),
             " ".join(
