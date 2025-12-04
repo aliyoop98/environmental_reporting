@@ -9,6 +9,27 @@ import os
 
 import pandas as pd
 
+
+def _canonicalize_channel_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Force channel/measurement columns to canonical names:
+    'Temperature' and 'Humidity' (title-case), regardless of case/alias drift.
+    """
+    if df is None or df.empty:
+        return df
+    rename: Dict[str, str] = {}
+    for col in list(df.columns):
+        if not isinstance(col, str):
+            continue
+        key = _normalize_header(col)  # e.g., "temperature", "rh", "relative humidity"
+        if key in {"temperature", "temp", "temperature c", "temp c", "deg c", "degc"}:
+            rename[col] = "Temperature"
+        elif key in {"humidity", "rh", "relative humidity", "humidity rh"}:
+            rename[col] = "Humidity"
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
 # Debug toggler: set ER_DEBUG=1 to enable verbose parse logs
 DEBUG = os.getenv("ER_DEBUG", "0") == "1"
 
@@ -317,8 +338,9 @@ def _apply_inferred_ranges(
 
     profile = _infer_profile_from_name(*name_hints)
     limits = PROFILE_LIMITS.get(profile or "") if profile else None
+    # If no profile could be inferred, default to ambient so Temperature isn't dropped.
     if not limits:
-        limits = {"temp": None, "humi": DEFAULT_HUMIDITY_RANGE}
+        limits = {"temp": DEFAULT_TEMP_RANGE, "humi": DEFAULT_HUMIDITY_RANGE}
 
     temp_range = limits.get("temp") or range_map.get("Temperature") or DEFAULT_TEMP_RANGE
     humidity_range = limits.get("humi") or range_map.get("Humidity") or DEFAULT_HUMIDITY_RANGE
@@ -395,6 +417,8 @@ def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     result = df.copy()
+    # Ensure channel columns use canonical names before anything else.
+    result = _canonicalize_channel_columns(result)
     if "DateTime" in result.columns:
         result["DateTime"] = pd.to_datetime(result["DateTime"], errors="coerce")
         result = result.dropna(subset=["DateTime"])  # type: ignore[arg-type]
@@ -411,6 +435,7 @@ def _finalize_serial_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     result = _downcast_numeric(result)
 
+    # After canonicalization, 'Temperature'/'Humidity' should be in preferred order.
     ordered: List[str] = []
     for col in ["Date", "Time", "DateTime", "Temperature", "Humidity"]:
         if col in result.columns:
@@ -811,6 +836,8 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             .rename_axis(None, axis=1)
             .sort_values("DateTime")
         )
+        # Canonicalize measurement column names to match range keys & UI expectations
+        pivot = _canonicalize_channel_columns(pivot)
         # Keep the raw timestamp resolution intact for charting; aggregation is
         # handled later when producing summary reports rather than at ingest
         # time.
@@ -1015,6 +1042,8 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         .rename_axis(None, axis=1)
         .sort_values("DateTime")
     )
+    # Canonicalize measurement column names to match range keys & UI expectations
+    wide = _canonicalize_channel_columns(wide)
 
     if wide.empty:
         return []
@@ -1487,6 +1516,8 @@ def _process_new_schema_df(
         if pivot.empty:
             continue
         pivot = pivot.rename_axis(None, axis=1).sort_index()
+        # Canonicalize measurement columns from any mixed case/alias drift.
+        pivot = _canonicalize_channel_columns(pivot)
         # Do not resample or collapse timestamps here; downstream consumers rely
         # on the native cadence for visualisations and alert calculations.
         expected_channels = {
