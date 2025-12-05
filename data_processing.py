@@ -246,6 +246,22 @@ NEW_SCHEMA_ALIASES: Dict[str, Tuple[str, ...]] = {
 TEMP_COL_ALIASES = ["Temperature", "Temp", "Temp (°C)", "Temperature (°C)"]
 HUMI_COL_ALIASES = ["Humidity", "Humidity (%RH)", "RH", "RH (%)"]
 
+def _clean_unit_text(s: str) -> str:
+    """
+    Normalize unit strings aggressively:
+    - collapse unicode oddities (Â°, thin spaces, NBSP),
+    - remove all whitespace,
+    - lowercase for robust matching.
+    """
+    if s is None:
+        return ""
+    t = unicodedata.normalize("NFKC", str(s))
+    # common weird chars around degrees/spaces in exports
+    t = t.replace("Â°", "°")
+    t = t.replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ")
+    t = re.sub(r"\s+", "", t)  # strip all spaces so " °C" -> "°C"
+    return t.lower()
+
 PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
     "Freezer": {"temp": (-35.0, -5.0), "humi": None},
     "Fridge": {"temp": (2.0, 8.0), "humi": None},
@@ -593,23 +609,25 @@ def _normalize_unit_text(unit: object) -> str:
 
 
 def _is_temp_unit(unit: object) -> bool:
-    value = _normalize_unit_text(unit).lower()
-    compact = value.replace(" ", "")
-    return bool(
-        re.search(r"°\s*[cf]\b", value)
-        or "°c" in compact
-        or "°f" in compact
-        or "degc" in value
-        or "deg f" in value
-        or "celsius" in value
-        or "fahrenheit" in value
-        or value.strip() in {"c", "f"}  # bare symbol in some exports
+    u = _clean_unit_text(unit)
+    # accept °c, degc, c, celsius; handle °f too (if we ever see F)
+    return (
+        ("°c" in u)
+        or ("degc" in u)
+        or (u == "c")
+        or ("celsius" in u)
+        or ("°f" in u)
+        or ("degf" in u)
+        or (u == "f")
+        or ("fahrenheit" in u)
     )
 
 
 def _is_rh_unit(unit: object) -> bool:
-    value = _normalize_unit_text(unit).lower()
-    return "%" in value or "rh" in value or "humidity" in value
+    u = _clean_unit_text(unit)
+    # after removing spaces, '%' will be gone; check raw too
+    raw = (unit or "").lower()
+    return ("%rh" in u) or ("rh" in u) or ("humidity" in u) or ("percent" in u) or ("%" in raw)
 
 
 def _infer_kind_from_unit_and_value(
@@ -754,7 +772,13 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     if df.empty:
         return []
 
-    df["Value"] = df["Data"].apply(_parse_numeric_value)
+    # extract number; support comma or dot decimals
+    df["Value"] = (
+        df["Data"].astype(str)
+        .str.extract(r"([-+]?\d+(?:[.,]\d+)?)")[0]
+        .str.replace(",", ".", regex=False)
+        .astype(float)
+    )
 
     # Derive a unit token from the Data field when Unit is blank/garbled
     # (e.g., "19.84 °C" or "66.2 %").
@@ -809,6 +833,12 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
         )
 
     df["Kind"] = df.apply(_row_kind, axis=1)
+    # Belt & suspenders: if the unit clearly says temp/humidity, enforce it.
+    if "Unit" in df.columns:
+        temp_mask = df["Unit"].apply(_is_temp_unit)
+        humi_mask = df["Unit"].apply(_is_rh_unit)
+        df.loc[temp_mask, "Kind"] = "Temperature"
+        df.loc[humi_mask, "Kind"] = "Humidity"
     # Quick visibility for stubborn rows
     if DEBUG:
         bad = df[df["Kind"].isna() | (df["Kind"] == "")]
@@ -836,6 +866,12 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             .rename_axis(None, axis=1)
             .sort_values("DateTime")
         )
+        # If classification produced variant casing, normalize columns
+        pivot.columns = [
+            "Temperature" if str(c).strip().lower() == "temperature" else
+            "Humidity" if str(c).strip().lower() == "humidity" else c
+            for c in pivot.columns
+        ]
         # Canonicalize measurement column names to match range keys & UI expectations
         pivot = _canonicalize_channel_columns(pivot)
         # Keep the raw timestamp resolution intact for charting; aggregation is
@@ -976,8 +1012,12 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
     if df.empty:
         return []
 
+    # extract number; support comma or dot decimals
     df["Value"] = (
-        df["Data"].astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0].astype(float)
+        df["Data"].astype(str)
+        .str.extract(r"([-+]?\d+(?:[.,]\d+)?)")[0]
+        .str.replace(",", ".", regex=False)
+        .astype(float)
     )
     df = df.dropna(subset=["Value"])
     if df.empty:
@@ -1033,6 +1073,12 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         ),
         axis=1,
     )
+    # Enforce unit-based override
+    if "Unit" in df.columns:
+        temp_mask = df["Unit"].apply(_is_temp_unit)
+        humi_mask = df["Unit"].apply(_is_rh_unit)
+        df.loc[temp_mask, "Kind"] = "Temperature"
+        df.loc[humi_mask, "Kind"] = "Humidity"
 
     df = df.drop(columns=["__context__"], errors="ignore")
 
