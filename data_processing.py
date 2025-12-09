@@ -272,15 +272,6 @@ PROFILE_LIMITS: Dict[str, Dict[str, Optional[Tuple[float, float]]]] = {
     "Freezer -80": {"temp": (-86.0, -70.0), "humi": None},
 }
 
-# Optional manual overrides for quirky serials and channels. Keys should match the
-# serial identifier, and nested keys should match channel labels after
-# normalization.
-SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {
-    "250269655": {"sensor1": "Humidity", "sensor2": "Temperature"},
-    "250269656": {"sensor1": "Humidity", "sensor2": "Temperature"},
-    "250259653": {"sensor1": "Humidity", "sensor2": "Temperature"},
-}
-
 
 def _parse_ts(value: object) -> pd.Timestamp:
     """Return a normalized timestamp using deterministic formats first."""
