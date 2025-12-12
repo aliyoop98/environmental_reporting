@@ -818,7 +818,6 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
                 if piece
             ),
             serial=row.get("Serial", ""),
-            overrides=SERIAL_KIND_OVERRIDES,
             other_channel_present=other_channel_present,
             channel_context=row.get("__context__", ""),
         )
@@ -1058,7 +1057,6 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
             row.get("Value"),
             filename_hint,
             serial=serial,
-            overrides=SERIAL_KIND_OVERRIDES,
             other_channel_present=has_sensor2,
             channel_context=row.get("__context__", ""),
         ),
