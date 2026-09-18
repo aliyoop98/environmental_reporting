@@ -66,6 +66,11 @@ def _read_any_csv(file_obj) -> pd.DataFrame:
                 index_col=False,
                 skipinitialspace=True,
             )
+            # A wrong delimiter can still produce a superficially valid
+            # one-column frame (and may silently discard extra fields).  Keep
+            # trying until the header is actually split into columns.
+            if len(df.columns) < 2:
+                continue
             df.columns = [re.sub(r"\s+", " ", (col or "")).strip() for col in df.columns]
             return df
         except Exception:
@@ -1988,12 +1993,6 @@ def merge_serial_data(existing: dict, new_df, serial: str):
             return pd.NA
         return valid.iloc[-1]
 
-    def _average_measurement(series: pd.Series):
-        numeric = pd.to_numeric(series, errors="coerce").dropna()
-        if numeric.empty:
-            return pd.NA
-        return float(numeric.mean())
-
     base = existing.get(serial)
     if not isinstance(new_df, pd.DataFrame) or new_df.empty:
         if isinstance(base, pd.DataFrame):
@@ -2013,10 +2012,9 @@ def merge_serial_data(existing: dict, new_df, serial: str):
 
         value_cols = [col for col in merged.columns if col != "DateTime"]
         if value_cols:
-            agg_map = {
-                col: (_average_measurement if col in {"Temperature", "Humidity"} else _coalesce_series)
-                for col in value_cols
-            }
+            # Preserve the latest uploaded reading while still coalescing
+            # complementary temperature/humidity rows at the same timestamp.
+            agg_map = {col: _coalesce_series for col in value_cols}
             merged = merged.groupby("DateTime", as_index=False, sort=True).agg(agg_map)
         else:
             merged = merged.drop_duplicates(subset=["DateTime"], keep="last")
