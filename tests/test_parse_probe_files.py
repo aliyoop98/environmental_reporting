@@ -142,6 +142,35 @@ def test_parse_serial_csv_extracts_unique_serials():
     assert info_a['default_label'] in {"Chamber 1", "SN-A"}
 
 
+def test_parse_serial_csv_infers_ambient_temperature_from_complementary_channel():
+    """Ambient models can reverse the usual sensor-number assignments."""
+
+    csv_text = "\n".join(
+        [
+            "Timestamp,Serial Number,Channel,Data,Unit of Measure,Space Type",
+            "2024-02-01 00:00:00,AMB-REVERSED,Sensor 1,21.4,,Ambient",
+            "2024-02-01 00:00:00,AMB-REVERSED,Sensor 2,48.2,%RH,Ambient",
+            "2024-02-01 00:05:00,AMB-REVERSED,Sensor 1,21.6,,Ambient",
+            "2024-02-01 00:05:00,AMB-REVERSED,Sensor 2,48.6,%RH,Ambient",
+            # A conventional device in the same consolidated file must retain
+            # the normal sensor-1 RH / sensor-2 temperature interpretation.
+            "2024-02-01 00:00:00,AMB-NORMAL,Sensor 1,51.0,%RH,Ambient",
+            "2024-02-01 00:00:00,AMB-NORMAL,Sensor 2,22.1,,Ambient",
+            "",
+        ]
+    )
+
+    serials = parse_serial_csv([InMemoryFile(csv_text, "ambient.csv")])
+
+    reversed_df = serials["AMB-REVERSED"]["df"]
+    assert reversed_df["Temperature"].tolist() == [21.4, 21.6]
+    assert reversed_df["Humidity"].tolist() == [48.2, 48.6]
+
+    normal_df = serials["AMB-NORMAL"]["df"]
+    assert normal_df["Temperature"].tolist() == [22.1]
+    assert normal_df["Humidity"].tolist() == [51.0]
+
+
 def test_serial_data_to_primary_uses_datetime_dates():
     csv_text = "\n".join(
         [

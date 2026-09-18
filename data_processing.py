@@ -889,9 +889,62 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     df.loc[temp_mask, "Kind"] = "Temperature"
     df.loc[humi_mask, "Kind"] = "Humidity"
 
+    # Sensor numbering is not consistent across Traceable ambient devices:
+    # some models use sensor 1 for RH and sensor 2 for temperature, while
+    # others do the reverse.  Before applying the legacy number-based fallback,
+    # learn each serial's channel pairing from rows whose units (or channel
+    # labels) identify one side unambiguously.  With exactly two physical
+    # channels, the other channel must be the complementary measurement.  This
+    # prevents an unlabelled temperature channel from being folded into the
+    # clearly labelled humidity channel during the pivot.
+    df["ChannelKey"] = df["Channel"].map(_normalize_channel_key)
+    for _, serial_group in df.groupby(df["Serial"].astype(str), sort=False):
+        channel_keys = [
+            key for key in serial_group["ChannelKey"].dropna().unique() if key
+        ]
+        if len(channel_keys) != 2:
+            continue
+
+        known_by_channel: Dict[str, str] = {}
+        for channel_key, channel_group in serial_group.groupby("ChannelKey", sort=False):
+            known_kinds = channel_group["Kind"].dropna().unique()
+            if len(known_kinds) == 1:
+                known_by_channel[str(channel_key)] = str(known_kinds[0])
+                continue
+
+            # Explicit channel words are also reliable even when the unit is
+            # empty, unlike sensor numbers whose meaning varies by model.
+            channel_kind = _classify_measurement(
+                str(channel_group["Channel"].iloc[0]),
+                "",
+                allow_sensor_fallback=False,
+            )
+            if channel_kind:
+                known_by_channel[str(channel_key)] = channel_kind
+
+        known_kinds = set(known_by_channel.values())
+        if len(known_by_channel) != 1 or len(known_kinds) != 1:
+            continue
+
+        known_channel = next(iter(known_by_channel))
+        missing_kind = (
+            "Temperature"
+            if next(iter(known_kinds)) == "Humidity"
+            else "Humidity"
+        )
+        other_channel = next(key for key in channel_keys if key != known_channel)
+        infer_mask = (
+            df.index.isin(serial_group.index)
+            & df["Kind"].isna()
+            & df["ChannelKey"].eq(other_channel)
+        )
+        df.loc[infer_mask, "Kind"] = missing_kind
+
     unresolved = df["Kind"].isna()
     if unresolved.any():
         df.loc[unresolved, "Kind"] = df.loc[unresolved].apply(_row_kind, axis=1)
+
+    df = df.drop(columns=["ChannelKey"])
 
     # Belt & suspenders: clear unit labels remain authoritative.
     df.loc[temp_mask, "Kind"] = "Temperature"
