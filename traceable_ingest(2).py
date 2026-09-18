@@ -18,7 +18,7 @@ import pandas as pd
 SERIAL_KIND_OVERRIDES: Dict[str, Dict[str, str]] = {
     "250269655": {"sensor1": "Humidity", "sensor2": "Temperature"},
     "250269656": {"sensor1": "Humidity", "sensor2": "Temperature"},
-    "250259653": {"sensor1": "Humidity", "sensor2": "Temperature"},
+    "250269653": {"sensor1": "Humidity", "sensor2": "Temperature"},
 }
 
 
@@ -130,22 +130,22 @@ def _classify_channel(channel: str, unit: str) -> Optional[str]:
         "sensor01": "Humidity",
         "sensor02": "Temperature",
     }
-    if channel_key in direct_map:
-        return direct_map[channel_key]
 
-    if not channel_norm and unit_norm:
-        channel_norm = unit_norm
-
-    if any(token in channel_norm for token in ("humid", "rh")):
-        return "Humidity"
-    if any(token in unit_norm for token in ("%", "percent")):
+    # Unit wins over sensor numbering.  Sensor labels are a fallback only.
+    if any(token in unit_norm for token in ("%", "percent", "humidity", "rh")):
         return "Humidity"
 
     temp_tokens = ("temp", "°c", "celsius", "degc", "°f", "fahrenheit")
-    if any(token in channel_norm for token in temp_tokens):
-        return "Temperature"
     if any(token in unit_norm for token in temp_tokens):
         return "Temperature"
+
+    if any(token in channel_norm for token in ("humid", "rh")):
+        return "Humidity"
+    if any(token in channel_norm for token in temp_tokens):
+        return "Temperature"
+
+    if channel_key in direct_map:
+        return direct_map[channel_key]
 
     if channel_norm in {"temperature", "humidity"}:
         return channel_norm.capitalize()

@@ -40,7 +40,13 @@ def dprint(*args, **kwargs):
 
 
 def _read_any_csv(file_obj) -> pd.DataFrame:
-    """Return a dataframe from a CSV or TSV stream, handling messy inputs."""
+    """Return a dataframe from a CSV or TSV stream, handling messy inputs.
+
+    Try the common explicit delimiters with pandas' fast parser first.  The
+    previous implementation tried ``sep=None`` first, which forces the Python
+    parser and can be extremely slow on large TraceableLive consolidated
+    exports.  Delimiter sniffing remains as the final fallback.
+    """
 
     raw = file_obj.read()
     if isinstance(raw, bytes):
@@ -48,16 +54,17 @@ def _read_any_csv(file_obj) -> pd.DataFrame:
     else:
         text = str(raw)
 
-    for sep in (None, ",", "\t", ";"):
+    for sep in (",", "\t", ";", None):
         try:
             df = pd.read_csv(
                 io.StringIO(text),
-                engine="python",
+                engine="python" if sep is None else "c",
                 sep=sep,
                 on_bad_lines="skip",
                 dtype=str,
                 keep_default_na=False,
                 index_col=False,
+                skipinitialspace=True,
             )
             df.columns = [re.sub(r"\s+", " ", (col or "")).strip() for col in df.columns]
             return df
@@ -123,6 +130,38 @@ def _parse_ts_safe(s: str):
         except Exception:
             continue
     return pd.to_datetime(text, errors="coerce")
+
+
+def _parse_ts_series(series: pd.Series) -> pd.Series:
+    """Vectorized timestamp parsing for large TraceableLive exports."""
+
+    text = series.astype("string").str.strip()
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%Y-%b-%d %H:%M",
+        "%d-%b-%Y %H:%M",
+        "%Y-%m-%d %H:%M",
+    )
+    for fmt in formats:
+        mask = result.isna() & text.notna() & text.ne("")
+        if not mask.any():
+            break
+        parsed = pd.to_datetime(text.loc[mask], format=fmt, errors="coerce")
+        good = parsed.notna()
+        if good.any():
+            result.loc[parsed.index[good]] = parsed.loc[good]
+
+    mask = result.isna() & text.notna() & text.ne("")
+    if mask.any():
+        try:
+            result.loc[mask] = pd.to_datetime(text.loc[mask], format="mixed", errors="coerce")
+        except (TypeError, ValueError):
+            result.loc[mask] = pd.to_datetime(text.loc[mask], errors="coerce")
+    return result
 
 _ZERO_WIDTH_CHARS = ("\ufeff", "\u200b", "\u200c", "\u200d")
 
@@ -756,7 +795,7 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
     if df.empty:
         return []
 
-    df["Timestamp"] = df["Timestamp"].apply(_parse_ts_safe)
+    df["Timestamp"] = _parse_ts_series(df["Timestamp"])
     df = df.dropna(subset=["Timestamp"])
     df = df.sort_values("Timestamp")
     df["DateTime"] = df["Timestamp"]
@@ -822,13 +861,36 @@ def _parse_consolidated_serial_df(df: pd.DataFrame, source_name: str) -> List[Di
             channel_context=row.get("__context__", ""),
         )
 
-    df["Kind"] = df.apply(_row_kind, axis=1)
-    # Belt & suspenders: if the unit clearly says temp/humidity, enforce it.
-    if "Unit" in df.columns:
-        temp_mask = df["Unit"].apply(_is_temp_unit)
-        humi_mask = df["Unit"].apply(_is_rh_unit)
-        df.loc[temp_mask, "Kind"] = "Temperature"
-        df.loc[humi_mask, "Kind"] = "Humidity"
+    # Classify the common unit-labelled rows vectorially.  Only ambiguous rows
+    # fall back to the more expensive row-wise heuristics.
+    unit_clean = (
+        df["UnitToken"]
+        .astype("string")
+        .fillna("")
+        .str.replace("Â°", "°", regex=False)
+        .str.replace(r"\s+", "", regex=True)
+        .str.lower()
+    )
+    humi_mask = unit_clean.str.contains(r"%|rh|humidity|percent", regex=True, na=False)
+    temp_mask = (
+        unit_clean.str.contains(
+            r"°c|degc|celsius|°f|degf|fahrenheit|degk|kelvin",
+            regex=True,
+            na=False,
+        )
+        | unit_clean.isin({"c", "f", "k"})
+    )
+    df["Kind"] = pd.Series(pd.NA, index=df.index, dtype="object")
+    df.loc[temp_mask, "Kind"] = "Temperature"
+    df.loc[humi_mask, "Kind"] = "Humidity"
+
+    unresolved = df["Kind"].isna()
+    if unresolved.any():
+        df.loc[unresolved, "Kind"] = df.loc[unresolved].apply(_row_kind, axis=1)
+
+    # Belt & suspenders: clear unit labels remain authoritative.
+    df.loc[temp_mask, "Kind"] = "Temperature"
+    df.loc[humi_mask, "Kind"] = "Humidity"
     # Quick visibility for stubborn rows
     if DEBUG:
         bad = df[df["Kind"].isna() | (df["Kind"] == "")]
@@ -995,7 +1057,7 @@ def _parse_traceable_report_text(text: str, source_name: str) -> List[Dict[str, 
         rename_map[serial_col] = "Serial"
     df = df.rename(columns=rename_map)
 
-    df["Timestamp"] = df["Timestamp"].apply(_parse_ts_safe)
+    df["Timestamp"] = _parse_ts_series(df["Timestamp"])
     df = df.dropna(subset=["Timestamp"])
     df = df.sort_values("Timestamp")
     df["DateTime"] = df["Timestamp"]
@@ -1444,7 +1506,7 @@ def _process_new_schema_df(
     df_new["Channel"] = df_new["Channel"].str.strip()
     df_new["Unit of Measure"] = df_new["Unit of Measure"].fillna("").str.strip()
 
-    df_new["Timestamp"] = df_new["Timestamp"].apply(_parse_ts)
+    df_new["Timestamp"] = _parse_ts_series(df_new["Timestamp"])
     df_new = df_new.dropna(subset=["Timestamp"])
     df_new = df_new.sort_values("Timestamp")
     df_new["DateTime"] = df_new["Timestamp"]
@@ -1484,10 +1546,16 @@ def _process_new_schema_df(
         "temp": "Temperature",
     }
     channel_lower = channel_original.astype(str).str.lower()
-    df_new["Channel"] = channel_lower.map(sensor_map)
-    df_new["Channel"] = df_new["Channel"].where(df_new["Channel"].notna(), measurement_series)
+    # Unit-aware classification must win.  Traceable channel names are not
+    # reliable enough to overwrite a clear %RH/temperature unit.  Sensor-number
+    # mapping is only a fallback when the measurement could not otherwise be
+    # identified.
+    df_new["Channel"] = measurement_series
     df_new["Channel"] = df_new["Channel"].where(
         df_new["Channel"].notna(), channel_lower.map(direct_channel_map)
+    )
+    df_new["Channel"] = df_new["Channel"].where(
+        df_new["Channel"].notna(), channel_lower.map(sensor_map)
     )
     df_new["Channel"] = df_new["Channel"].where(df_new["Channel"].notna(), channel_original)
     df_new["Channel"] = df_new["Channel"].astype("string").str.strip()
@@ -1920,6 +1988,12 @@ def merge_serial_data(existing: dict, new_df, serial: str):
             return pd.NA
         return valid.iloc[-1]
 
+    def _average_measurement(series: pd.Series):
+        numeric = pd.to_numeric(series, errors="coerce").dropna()
+        if numeric.empty:
+            return pd.NA
+        return float(numeric.mean())
+
     base = existing.get(serial)
     if not isinstance(new_df, pd.DataFrame) or new_df.empty:
         if isinstance(base, pd.DataFrame):
@@ -1939,7 +2013,10 @@ def merge_serial_data(existing: dict, new_df, serial: str):
 
         value_cols = [col for col in merged.columns if col != "DateTime"]
         if value_cols:
-            agg_map = {col: _coalesce_series for col in value_cols}
+            agg_map = {
+                col: (_average_measurement if col in {"Temperature", "Humidity"} else _coalesce_series)
+                for col in value_cols
+            }
             merged = merged.groupby("DateTime", as_index=False, sort=True).agg(agg_map)
         else:
             merged = merged.drop_duplicates(subset=["DateTime"], keep="last")

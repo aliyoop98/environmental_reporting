@@ -471,10 +471,25 @@ def _prepare_serial_primary(
             combined['DateTime'] = pd.to_datetime(combined['DateTime'], errors='coerce')
             combined = combined.dropna(subset=['DateTime'])
             combined = combined.sort_values('DateTime')
-            combined = (
-                combined.groupby('DateTime', as_index=False, sort=True)
-                .agg({col: 'last' for col in combined.columns if col != 'DateTime'})
-            )
+
+            def _coalesce_last(series: pd.Series):
+                valid = series.dropna()
+                return valid.iloc[-1] if not valid.empty else pd.NA
+
+            def _average_measurement(series: pd.Series):
+                numeric = pd.to_numeric(series, errors='coerce').dropna()
+                return float(numeric.mean()) if not numeric.empty else pd.NA
+
+            agg_map = {
+                col: (
+                    _average_measurement
+                    if col in {'Temperature', 'Humidity'}
+                    else _coalesce_last
+                )
+                for col in combined.columns
+                if col != 'DateTime'
+            }
+            combined = combined.groupby('DateTime', as_index=False, sort=True).agg(agg_map)
             combined['Date'] = combined['DateTime'].dt.date
             combined['Time'] = combined['DateTime'].dt.strftime('%H:%M')
         if 'Date' in combined.columns:
@@ -485,11 +500,22 @@ def _prepare_serial_primary(
         for rm in group.get('range_maps', []):  # type: ignore[assignment]
             range_map.update(rm)
 
-        channel_candidates = [
+        # Only expose channels that actually contain readings.  Keep the two
+        # TraceableLive measurements first so both are selected and graphed by
+        # default whenever the CSV contains them.
+        preferred_channels = [
+            col
+            for col in ('Temperature', 'Humidity')
+            if col in combined.columns
+            and pd.to_numeric(combined[col], errors='coerce').notna().any()
+        ]
+        other_channels = [
             col
             for col in combined.columns
-            if col not in {'Date', 'Time', 'DateTime'}
+            if col not in {'Date', 'Time', 'DateTime', 'Temperature', 'Humidity'}
+            and pd.to_numeric(combined[col], errors='coerce').notna().any()
         ]
+        channel_candidates = preferred_channels + other_channels
 
         descriptor = next(
             (label for label in group.get('option_labels', []) if label),
@@ -530,8 +556,14 @@ def _prepare_serial_primary(
     return primary_dfs, primary_ranges, metadata
 
 
+PARSER_CACHE_VERSION = "2026-09-18-both-channels-v2"
+
+
 @st.cache_data(show_spinner=False, max_entries=16)
-def _parse_cached(file_name: str, file_bytes: bytes):
+def _parse_cached(file_name: str, file_bytes: bytes, parser_version: str):
+    # ``parser_version`` is intentionally part of the cache key so deploying a
+    # parser fix cannot reuse an older cached parse of the same uploaded file.
+    _ = parser_version
     if __package__:
         from .data_processing import parse_serial_csv
     else:
@@ -610,13 +642,17 @@ serial_data: Dict[str, Dict[str, object]] = {}
 serial_to_key: Dict[str, str] = {}
 serial_frames: Dict[str, pd.DataFrame] = {}
 serial_row_counts: Dict[str, int] = {}
+upload_fingerprints: List[str] = []
 total_rows = 0
 if files_to_process:
     progress = st.sidebar.progress(0.0)
     for idx, uploaded in enumerate(files_to_process, start=1):
         try:
             file_bytes = uploaded.getvalue()
-            parsed = _parse_cached(uploaded.name, file_bytes)
+            upload_fingerprints.append(
+                f"{uploaded.name}:{hashlib.sha1(file_bytes).hexdigest()}"
+            )
+            parsed = _parse_cached(uploaded.name, file_bytes, PARSER_CACHE_VERSION)
         except Exception as exc:  # pragma: no cover - Streamlit UI feedback
             st.sidebar.error(f"Failed to parse {uploaded.name}")
             st.sidebar.exception(exc)
@@ -673,6 +709,10 @@ if files_to_process:
     progress.empty()
 else:
     st.sidebar.info("Upload consolidated serial CSV files to begin.")
+
+upload_signature = hashlib.sha1(
+    "|".join(sorted(upload_fingerprints)).encode("utf-8")
+).hexdigest()
 
 if not serial_data:
     st.sidebar.warning(
@@ -1460,19 +1500,57 @@ for tab, name in zip(tabs, serial_keys):
         }
         comparison_probes = list(comparison_options.keys())
 
-        channel_defaults = [col for col in base_range_map if col in df.columns]
-        if not channel_defaults:
-            channel_defaults = [
-                col
-                for col in df.columns
-                if col not in {'Date', 'Time', 'DateTime'}
-                and pd.api.types.is_numeric_dtype(df[col])
+        # Build the list from real, non-null data instead of from range-map
+        # aliases.  This guarantees Temperature and Humidity are both offered
+        # when both sensors are present in the uploaded TraceableLive CSV.
+        preferred_channel_defaults = [
+            col
+            for col in ('Temperature', 'Humidity')
+            if col in df.columns
+            and pd.to_numeric(df[col], errors='coerce').notna().any()
+        ]
+        range_channel_defaults = [
+            col
+            for col in base_range_map
+            if col in df.columns
+            and col not in preferred_channel_defaults
+            and pd.to_numeric(df[col], errors='coerce').notna().any()
+        ]
+        numeric_channel_defaults = [
+            col
+            for col in df.columns
+            if col not in {'Date', 'Time', 'DateTime'}
+            and col not in preferred_channel_defaults
+            and col not in range_channel_defaults
+            and pd.to_numeric(df[col], errors='coerce').notna().any()
+        ]
+        channel_defaults = (
+            preferred_channel_defaults
+            + range_channel_defaults
+            + numeric_channel_defaults
+        )
+
+        channel_widget_key = f"channels_{name}"
+        channel_upload_key = f"{channel_widget_key}__upload_signature"
+
+        # Streamlit persists multiselect state by widget key.  Without this
+        # reset, a serial that was previously showing one channel can remain
+        # stuck on one channel after a new CSV containing both sensors is
+        # uploaded.  Reset to every detected channel only when the upload set
+        # changes; ordinary reruns still preserve the user's manual choices.
+        if st.session_state.get(channel_upload_key) != upload_signature:
+            st.session_state[channel_widget_key] = list(channel_defaults)
+            st.session_state[channel_upload_key] = upload_signature
+        elif channel_widget_key in st.session_state:
+            st.session_state[channel_widget_key] = [
+                ch for ch in st.session_state[channel_widget_key]
+                if ch in channel_defaults
             ]
+
         channels = st.multiselect(
             "Channels to plot",
             options=channel_defaults,
-            default=channel_defaults,
-            key=f"channels_{name}"
+            key=channel_widget_key,
         )
 
         selected_serial_overlays: List[Dict[str, object]] = []
