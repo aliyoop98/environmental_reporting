@@ -556,7 +556,7 @@ def _prepare_serial_primary(
     return primary_dfs, primary_ranges, metadata
 
 
-PARSER_CACHE_VERSION = "2026-09-18-both-channels-v2"
+PARSER_CACHE_VERSION = "2026-09-18-ambient-channel-pairing-v3"
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
