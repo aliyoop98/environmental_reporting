@@ -1,0 +1,10 @@
+Status,Serial Number,Raw Rows,Temperature Source Rows,Temperature Duplicate Rows,Temperature Unique Source Timestamps,Temperature Plotted Points,Humidity Source Rows,Humidity Duplicate Rows,Humidity Unique Source Timestamps,Humidity Plotted Points,Shared Timestamps,Temperature-only Timestamps,Humidity-only Timestamps,Unpaired Timestamps,Detected Mapping,Start,End
+PASS,250269588,17640,8820,4,8816,8816,8820,4,8816,8816,8816,0,0,0,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:01:00,2026-08-31 23:58:00
+PASS,250269633,17640,8820,7,8813,8813,8820,7,8813,8813,8813,0,0,0,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:03:00,2026-08-31 23:56:00
+PASS,250269646,17648,8822,5,8817,8817,8826,6,8820,8820,8817,0,3,3,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:02:00,2026-08-31 23:58:00
+PASS,250269651,17818,8827,9,8818,8818,8991,54,8937,8937,8816,2,121,123,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:00:00,2026-08-31 23:58:00
+PASS,250269653,18000,8825,6,8819,8819,9175,174,9001,9001,8819,0,182,182,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:02:00,2026-08-31 23:56:00
+PASS,250269655,17764,8802,4,8798,8798,8962,79,8883,8883,8798,0,85,85,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:04:00,2026-08-31 23:56:00
+PASS,250269656,18725,9145,182,8963,8963,9580,303,9277,9277,8803,160,474,634,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:02:00,2026-08-31 23:58:00
+PASS,250269664,18026,8870,38,8832,8832,9156,109,9047,9047,8818,14,229,243,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:00:00,2026-08-31 23:58:00
+PASS,250742233,17642,8821,9,8812,8812,8821,9,8812,8812,8812,0,0,0,sensor1->Humidity | sensor2->Temperature,2026-08-01 00:00:00,2026-08-31 23:54:00

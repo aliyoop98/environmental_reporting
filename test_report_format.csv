@@ -1,0 +1,24 @@
+Device name: QA Room 101
+Location: Validation Lab
+Report start time: 01 Aug 2026, 00:00:00
+Report end time: 31 Aug 2026, 23:59:59
+Device id: QA5200
+Report Timezone: (UTC-07:00) Arizona
+
+Channel Data for pb1ch1 (Temperature)
+Timestamp, Data, Range
+8/1/2026 12:00:00 AM, 21.10 C, Min: 15 to Max: 25
+8/1/2026 12:05:00 AM, 21.20 C, Min: 15 to Max: 25
+----------------------------------------------
+
+Channel Data for pb1ch2 (Humidity)
+Timestamp, Data, Range
+8/1/2026 12:00:00 AM, 45.0 %, Min: 0 to Max: 60
+8/1/2026 12:05:00 AM, 46.0 %, Min: 0 to Max: 60
+----------------------------------------------
+
+Channel Data for pb3ch1 (Sensor 1)
+Timestamp, Data
+8/1/2026 12:00:01 AM, Door Close
+8/1/2026 12:05:01 AM, Door Open
+----------------------------------------------
