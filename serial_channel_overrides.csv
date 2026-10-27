@@ -1,7 +1,0 @@
-Serial Number,Channel,Measurement,Notes
-250269653,sensor1,Humidity,Validated against Aug 2026 production export; fallback if unit labels are missing or malformed
-250269653,sensor2,Temperature,Validated against Aug 2026 production export; fallback if unit labels are missing or malformed
-250269655,sensor1,Humidity,Validated against Aug 2026 production export; fallback if unit labels are missing or malformed
-250269655,sensor2,Temperature,Validated against Aug 2026 production export; fallback if unit labels are missing or malformed
-250269656,sensor1,Humidity,Validated against Aug 2026 production export; fallback if unit labels are missing or malformed
-250269656,sensor2,Temperature,Validated against Aug 2026 production export; fallback if unit labels are missing or malformed
