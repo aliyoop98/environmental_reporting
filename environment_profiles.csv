@@ -1,7 +1,0 @@
-Profile,Temperature Min,Temperature Max,Humidity Min,Humidity Max
-Room,15,25,0,60
-Olympus,15,28,0,80
-Olympus Room,15,28,0,80
-Fridge,2,8,,
-Freezer,-35,-5,,
-Freezer -80,-86,-70,,
