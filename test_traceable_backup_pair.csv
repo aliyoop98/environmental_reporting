@@ -1,0 +1,7 @@
+Timestamp,Serial Number,Channel,Data,Unit of Measure,Space Name,Space Type
+2026-09-01 00:00:00,TEST-BACKUP-001,Temperature,20.0,°C,Backup Test Area,Room
+2026-09-01 00:00:00,TEST-BACKUP-001,Humidity,50.0,%,Backup Test Area,Room
+2026-09-01 00:05:00,TEST-BACKUP-001,Temperature,30.0,°C,Backup Test Area,Room
+2026-09-01 00:05:00,TEST-BACKUP-001,Humidity,50.0,%,Backup Test Area,Room
+2026-09-01 00:20:00,TEST-BACKUP-001,Temperature,20.0,°C,Backup Test Area,Room
+2026-09-01 00:20:00,TEST-BACKUP-001,Humidity,50.0,%,Backup Test Area,Room
